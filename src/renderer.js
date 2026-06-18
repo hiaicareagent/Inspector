@@ -1260,6 +1260,36 @@ class InspectorBrowser {
 // ==========================================
 
 class BookmarksManager {
+  // Simple XOR + base64 obfuscation for password storage
+  // This prevents casual snooping but is NOT cryptographically secure
+  static encrypt(text) {
+    if (!text) return '';
+    const key = 'Inspector-Browser-v1';
+    let result = '';
+    for (let i = 0; i < text.length; i++) {
+      result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+    }
+    try {
+      return btoa(unescape(encodeURIComponent(result)));
+    } catch {
+      return '';
+    }
+  }
+
+  static decrypt(encoded) {
+    if (!encoded) return '';
+    try {
+      const key = 'Inspector-Browser-v1';
+      const decoded = decodeURIComponent(escape(atob(encoded)));
+      let result = '';
+      for (let i = 0; i < decoded.length; i++) {
+        result += String.fromCharCode(decoded.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+      }
+      return result;
+    } catch {
+      return '';
+    }
+  }
   constructor(browser) {
     this.browser = browser;
     this.STORAGE_KEY = 'inspector-bookmarks';
@@ -1277,6 +1307,7 @@ class BookmarksManager {
       modalCount: document.getElementById('bookmarks-modal-count'),
     };
 
+    this.initDragReorder();
     this.init();
   }
 
@@ -1286,18 +1317,27 @@ class BookmarksManager {
         id: 'bm-default-1',
         title: 'Google',
         url: 'https://www.google.com',
+        username: '',
+        password: '',
+        comments: '',
         addedAt: Date.now() - 86400000
       },
       {
         id: 'bm-default-2',
         title: 'GitHub',
         url: 'https://github.com',
+        username: '',
+        password: '',
+        comments: '',
         addedAt: Date.now() - 86400000
       },
       {
         id: 'bm-default-3',
         title: 'Inspector Docs',
         url: 'https://codebuff.com/docs',
+        username: '',
+        password: '',
+        comments: '',
         addedAt: Date.now() - 86400000
       }
     ];
@@ -1338,7 +1378,7 @@ class BookmarksManager {
     return 'bm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
   }
 
-  add(title, url) {
+  add(title, url, username = '', password = '', comments = '') {
     // Don't add duplicates
     const exists = this.bookmarks.some(b => b.url === url);
     if (exists) return false;
@@ -1347,6 +1387,9 @@ class BookmarksManager {
       id: this.generateId(),
       title: title || url,
       url: url,
+      username: username || '',
+      password: password ? this.constructor.encrypt(password) : '',
+      comments: comments || '',
       addedAt: Date.now()
     });
     this.save();
@@ -1364,14 +1407,21 @@ class BookmarksManager {
     this.updateBookmarkButton(this.browser.activeTabId);
   }
 
-  edit(id, newTitle, newUrl) {
+  edit(id, newTitle, newUrl, newUsername, newPassword, newComments) {
     const bm = this.bookmarks.find(b => b.id === id);
     if (!bm) return;
-    if (newTitle) bm.title = newTitle;
-    if (newUrl) bm.url = newUrl;
+    if (newTitle !== undefined) bm.title = newTitle;
+    if (newUrl !== undefined) bm.url = newUrl;
+    if (newUsername !== undefined) bm.username = newUsername;
+    if (newPassword !== undefined) bm.password = newPassword ? this.constructor.encrypt(newPassword) : '';
+    if (newComments !== undefined) bm.comments = newComments;
     this.save();
     this.render();
     this.renderModal();
+  }
+
+  hasCredentials(bm) {
+    return bm && (bm.username || bm.password);
   }
 
   isBookmarked(url) {
@@ -1418,10 +1468,12 @@ class BookmarksManager {
       item.title = bm.url;
 
       const icon = this.browser.getBookmarkIcon(bm.url);
+      const hasCreds = this.hasCredentials(bm);
 
       item.innerHTML = `
         <span class="bookmark-item-icon">${icon}</span>
         <span class="bookmark-item-title">${this.browser.escapeHtml(bm.title)}</span>
+        ${hasCreds ? '<span class="bookmark-item-creds-indicator" title="Has saved credentials">🔐</span>' : ''}
         <button class="bookmark-item-remove" title="Remove bookmark">&times;</button>
       `;
 
@@ -1442,6 +1494,109 @@ class BookmarksManager {
     });
   }
 
+  // ==========================================
+  // Drag and Drop Reordering
+  // ==========================================
+
+  initDragReorder() {
+    this.dragState = {
+      draggedId: null,
+      draggedEl: null
+    };
+  }
+
+  reorderBookmark(fromIndex, toIndex) {
+    if (fromIndex === toIndex) return;
+    const [moved] = this.bookmarks.splice(fromIndex, 1);
+    this.bookmarks.splice(toIndex, 0, moved);
+    this.save();
+    this.render();
+    this.renderModal();
+    this.updateBookmarkButton(this.browser.activeTabId);
+  }
+
+  onDragStart(e, bm) {
+    // Don't allow drag if editing inputs/buttons
+    if (e.target.closest('.bookmarks-edit-input') || e.target.closest('.bookmarks-modal-item-btn')) {
+      e.preventDefault();
+      return;
+    }
+
+    this.dragState.draggedId = bm.id;
+    this.dragState.draggedEl = e.currentTarget;
+
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', bm.id);
+
+    // Add dragging class after a tick so the browser captures the ghost image properly
+    requestAnimationFrame(() => {
+      e.currentTarget.classList.add('dragging');
+    });
+  }
+
+  onDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    const targetItem = e.currentTarget;
+    if (!targetItem || targetItem === this.dragState.draggedEl) return;
+
+    const rect = targetItem.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const isBelow = e.clientY > midY;
+
+    // Remove previous drag-over classes from all items
+    this.elements.modalContent.querySelectorAll('.bookmarks-modal-item').forEach(el => {
+      el.classList.remove('drag-over', 'drag-over-bottom');
+    });
+
+    if (isBelow) {
+      targetItem.classList.add('drag-over-bottom');
+    } else {
+      targetItem.classList.add('drag-over');
+    }
+  }
+
+  onDragLeave(e) {
+    const targetItem = e.currentTarget;
+    // Only remove if we actually left the element (not a child)
+    if (!targetItem.contains(e.relatedTarget)) {
+      targetItem.classList.remove('drag-over', 'drag-over-bottom');
+    }
+  }
+
+  onDrop(e) {
+    e.preventDefault();
+    const targetItem = e.currentTarget;
+    const draggedId = this.dragState.draggedId;
+    if (!draggedId || !targetItem) return;
+
+    const targetId = targetItem.dataset.id;
+    if (targetId === draggedId) return;
+
+    const fromIndex = this.bookmarks.findIndex(b => b.id === draggedId);
+    const toIndex = this.bookmarks.findIndex(b => b.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) return;
+
+    // Determine whether to insert before or after
+    const rect = targetItem.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const insertAfter = e.clientY > midY;
+
+    const adjustedToIndex = insertAfter ? toIndex + 1 : toIndex;
+    this.reorderBookmark(fromIndex, adjustedToIndex > fromIndex ? adjustedToIndex - 1 : adjustedToIndex);
+  }
+
+  onDragEnd(e) {
+    // Clean up all drag state
+    this.dragState.draggedId = null;
+    this.dragState.draggedEl = null;
+
+    this.elements.modalContent.querySelectorAll('.bookmarks-modal-item').forEach(el => {
+      el.classList.remove('dragging', 'drag-over', 'drag-over-bottom');
+    });
+  }
+
   renderModal() {
     this.elements.modalContent.innerHTML = '';
 
@@ -1455,14 +1610,31 @@ class BookmarksManager {
       const item = document.createElement('div');
       item.className = 'bookmarks-modal-item';
       item.dataset.id = bm.id;
+      item.draggable = true;
 
       const icon = this.browser.getBookmarkIcon(bm.url);
+      const hasCreds = this.hasCredentials(bm);
 
       item.innerHTML = `
-        <span class="bookmarks-modal-item-icon">${icon}</span>
+        <span class="bookmarks-modal-grip" title="Drag to reorder">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+        </span>
+        <span class="bookmarks-modal-item-icon">${hasCreds ? '🔐' : icon}</span>
         <div class="bookmarks-modal-item-info">
           <div class="bookmarks-modal-item-title">${this.browser.escapeHtml(bm.title)}</div>
           <div class="bookmarks-modal-item-url">${this.browser.escapeHtml(bm.url)}</div>
+          ${hasCreds ? `
+            <div class="bookmarks-modal-creds-row">
+              <span class="bookmarks-modal-creds-badge">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                Saved credentials
+              </span>
+              <button class="bookmarks-modal-creds-reveal" data-bm-id="${bm.id}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                Reveal
+              </button>
+            </div>
+          ` : ''}
         </div>
         <div class="bookmarks-modal-item-actions">
           <button class="bookmarks-modal-item-btn edit" title="Edit bookmark">
@@ -1476,14 +1648,15 @@ class BookmarksManager {
 
       // Click to navigate
       item.addEventListener('click', (e) => {
-        if (!e.target.closest('.bookmarks-modal-item-btn')) {
+        if (!e.target.closest('.bookmarks-modal-item-btn') && !e.target.closest('.bookmarks-modal-grip') && !e.target.closest('.bookmarks-modal-creds-reveal') && !e.target.closest('.bookmarks-modal-creds-popup')) {
           this.navigateTo(bm.url);
           this.closeModal();
         }
       });
 
       // Remove
-      item.querySelectorAll('.bookmarks-modal-item-btn')[1].addEventListener('click', (e) => {
+      const removeBtn = item.querySelectorAll('.bookmarks-modal-item-btn')[1];
+      removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.remove(bm.id);
       });
@@ -1494,25 +1667,140 @@ class BookmarksManager {
         this.startEdit(bm, item);
       });
 
+      // Reveal credentials
+      const revealBtn = item.querySelector('.bookmarks-modal-creds-reveal');
+      if (revealBtn) {
+        revealBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.revealCredentials(bm, item);
+        });
+      }
+
+      // Drag events
+      item.addEventListener('dragstart', (e) => this.onDragStart(e, bm));
+      item.addEventListener('dragover', (e) => this.onDragOver(e));
+      item.addEventListener('dragenter', (e) => e.preventDefault());
+      item.addEventListener('dragleave', (e) => this.onDragLeave(e));
+      item.addEventListener('drop', (e) => this.onDrop(e));
+      item.addEventListener('dragend', (e) => this.onDragEnd(e));
+
       this.elements.modalContent.appendChild(item);
     });
 
     this.elements.modalCount.textContent = `${this.bookmarks.length} bookmark${this.bookmarks.length !== 1 ? 's' : ''}`;
   }
 
+  revealCredentials(bm, itemEl) {
+    // Remove any existing popup first
+    const existing = itemEl.querySelector('.bookmarks-modal-creds-popup');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+
+    const decryptedPassword = bm.password ? this.constructor.decrypt(bm.password) : '';
+
+    const popup = document.createElement('div');
+    popup.className = 'bookmarks-modal-creds-popup';
+    popup.innerHTML = `
+      <div class="bookmarks-creds-field">
+        <span class="bookmarks-creds-label">Username / Email</span>
+        <div class="bookmarks-creds-value-row">
+          <span class="bookmarks-creds-value">${this.browser.escapeHtml(bm.username || '(not set)')}</span>
+          <button class="bookmarks-creds-copy-btn" data-copy="${this.browser.escapeHtml(bm.username || '')}" title="Copy username">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="bookmarks-creds-field">
+        <span class="bookmarks-creds-label">Password</span>
+        <div class="bookmarks-creds-value-row">
+          <input type="password" class="bookmarks-creds-password" value="${this.browser.escapeHtml(decryptedPassword)}" readonly>
+          <button class="bookmarks-creds-toggle-btn" title="Show/hide password">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+          </button>
+          <button class="bookmarks-creds-copy-btn" data-copy="${this.browser.escapeHtml(decryptedPassword)}" title="Copy password">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+          </button>
+        </div>
+      </div>
+      ${bm.comments ? `
+      <div class="bookmarks-creds-field">
+        <span class="bookmarks-creds-label">Comments</span>
+        <div class="bookmarks-creds-value" style="color:var(--text-secondary);margin-top:2px">${this.browser.escapeHtml(bm.comments)}</div>
+      </div>
+      ` : ''}
+    `;
+
+    // Insert popup after the icon but before the info in the item
+    const infoEl = itemEl.querySelector('.bookmarks-modal-item-info');
+    infoEl.appendChild(popup);
+
+    // Copy button handlers
+    popup.querySelectorAll('.bookmarks-creds-copy-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const text = btn.dataset.copy;
+        if (text) {
+          navigator.clipboard.writeText(text).then(() => {
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+            setTimeout(() => { btn.innerHTML = orig; }, 1500);
+          }).catch(() => {
+            // Fallback: select and copy manually
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+          });
+        }
+      });
+    });
+
+    // Password show/hide toggle
+    const toggleBtn = popup.querySelector('.bookmarks-creds-toggle-btn');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const pwdInput = popup.querySelector('.bookmarks-creds-password');
+        pwdInput.type = pwdInput.type === 'password' ? 'text' : 'password';
+      });
+    }
+  }
+
   startEdit(bm, itemEl) {
     const infoEl = itemEl.querySelector('.bookmarks-modal-item-info');
     const actionsEl = itemEl.querySelector('.bookmarks-modal-item-actions');
 
+    const decryptedPassword = bm.password ? this.constructor.decrypt(bm.password) : '';
+
     infoEl.innerHTML = `
       <input type="text" class="bookmarks-edit-input" id="edit-title" value="${this.browser.escapeHtml(bm.title)}" placeholder="Title">
       <input type="text" class="bookmarks-edit-input" id="edit-url" value="${this.browser.escapeHtml(bm.url)}" placeholder="URL">
-      <div class="bookmarks-edit-actions">
+      <div class="bookmarks-edit-section-label">Credentials</div>
+      <input type="text" class="bookmarks-edit-input" id="edit-username" value="${this.browser.escapeHtml(bm.username || '')}" placeholder="Username / Email" autocomplete="off">
+      <div class="bookmarks-edit-pwd-row">
+        <input type="password" class="bookmarks-edit-input" id="edit-password" value="${this.browser.escapeHtml(decryptedPassword)}" placeholder="Password" autocomplete="off">
+        <button class="bookmarks-edit-pwd-toggle" id="edit-pwd-toggle" title="Show/hide password">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+        </button>
+      </div>
+      <input type="text" class="bookmarks-edit-input" id="edit-comments" value="${this.browser.escapeHtml(bm.comments || '')}" placeholder="Comments (optional)">
+      <div class="bookmarks-edit-actions" style="margin-top:8px">
         <button class="bookmarks-edit-save" id="edit-save">Save</button>
         <button class="bookmarks-edit-cancel" id="edit-cancel">Cancel</button>
       </div>
     `;
     actionsEl.style.display = 'none';
+
+    // Password show/hide toggle
+    document.getElementById('edit-pwd-toggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const pwdInput = document.getElementById('edit-password');
+      pwdInput.type = pwdInput.type === 'password' ? 'text' : 'password';
+    });
 
     document.getElementById('edit-save').addEventListener('click', () => {
       const newTitle = document.getElementById('edit-title').value.trim() || bm.title;
@@ -1520,7 +1808,10 @@ class BookmarksManager {
       if (!newUrl.startsWith('http://') && !newUrl.startsWith('https://')) {
         newUrl = 'https://' + newUrl;
       }
-      this.edit(bm.id, newTitle, newUrl);
+      const newUsername = document.getElementById('edit-username').value.trim();
+      const newPassword = document.getElementById('edit-password').value;
+      const newComments = document.getElementById('edit-comments').value.trim();
+      this.edit(bm.id, newTitle, newUrl, newUsername, newPassword, newComments);
     });
 
     document.getElementById('edit-cancel').addEventListener('click', () => {
@@ -1530,17 +1821,17 @@ class BookmarksManager {
     // Focus the title input
     setTimeout(() => document.getElementById('edit-title')?.focus(), 50);
 
-    // Handle Enter key on both inputs to save
-    document.getElementById('edit-title').addEventListener('keydown', (e) => {
+    // Handle Enter key on title and url inputs to save
+    const handleEnter = (e) => {
       if (e.key === 'Enter') {
         document.getElementById('edit-save')?.click();
       }
-    });
-    document.getElementById('edit-url').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        document.getElementById('edit-save')?.click();
-      }
-    });
+    };
+    document.getElementById('edit-title').addEventListener('keydown', handleEnter);
+    document.getElementById('edit-url').addEventListener('keydown', handleEnter);
+    document.getElementById('edit-username').addEventListener('keydown', handleEnter);
+    document.getElementById('edit-password').addEventListener('keydown', handleEnter);
+    document.getElementById('edit-comments').addEventListener('keydown', handleEnter);
   }
 
   // ==========================================
