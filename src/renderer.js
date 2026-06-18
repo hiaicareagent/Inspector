@@ -27,6 +27,7 @@ class InspectorBrowser {
       monitorPanel: document.getElementById('monitor-panel'),
       monitorContent: document.getElementById('monitor-content'),
       panelSplitter: document.getElementById('panel-splitter'),
+      bookmarksPage: document.getElementById('bookmarks-page'),
     };
 
     this.init();
@@ -40,6 +41,7 @@ class InspectorBrowser {
     this.setupMonitorPanel();
     this.setupResizer();
     this.setupIPCEvents();
+    this._startedAt = performance.now();
   }
 
   // ==========================================
@@ -94,7 +96,7 @@ class InspectorBrowser {
     this.tabIdCounter++;
     const tabId = this.tabIdCounter;
 
-    // Create webview
+    // Create webview — needs explicit width/height for Electron's webview renderer
     const webview = document.createElement('webview');
     webview.setAttribute('webpreferences', 'contextIsolation=yes');
     webview.setAttribute('allowpopups', '');
@@ -234,8 +236,13 @@ class InspectorBrowser {
     // Deactivate current tab
     if (this.activeTabId) {
       const currentTab = this.tabs.get(this.activeTabId);
-      if (currentTab && currentTab.webview) {
-        currentTab.webview.style.display = 'none';
+      if (currentTab) {
+        if (currentTab.webview) {
+          currentTab.webview.style.display = 'none';
+        } else if (currentTab.type === 'internal') {
+          // Hide the internal page container
+          this.elements.bookmarksPage.classList.remove('active');
+        }
       }
       const currentTabEl = this.elements.tabContainer.querySelector(`.tab[data-tab-id="${this.activeTabId}"]`);
       if (currentTabEl) currentTabEl.classList.remove('active');
@@ -245,10 +252,21 @@ class InspectorBrowser {
     this.activeTabId = tabId;
     const tab = this.tabs.get(tabId);
 
-    if (tab && tab.webview) {
-      tab.webview.style.display = 'block';
-      // Force layout so the webview renders
-      tab.webview.style.flex = '1';
+    if (tab) {
+      if (tab.webview) {
+        // Hide any internal pages
+        if (this.elements.bookmarksPage) {
+          this.elements.bookmarksPage.classList.remove('active');
+        }
+        tab.webview.style.display = 'block';
+        tab.webview.style.flex = '1';
+      } else if (tab.type === 'internal') {
+        // Show the internal page container
+        const pageEl = document.getElementById(tab.internalPage + '-page');
+        if (pageEl) {
+          pageEl.classList.add('active');
+        }
+      }
     }
 
     const tabEl = this.elements.tabContainer.querySelector(`.tab[data-tab-id="${tabId}"]`);
@@ -271,8 +289,58 @@ class InspectorBrowser {
       this.bookmarks.updateBookmarkButton(tabId);
     }
 
-    // Switch monitor data to this tab
-    this.refreshMonitorPanelForTab(tabId);
+    // Switch monitor data to this tab (skip for internal tabs)
+    if (tab && tab.type !== 'internal') {
+      this.refreshMonitorPanelForTab(tabId);
+    }
+  }
+
+  // ==========================================
+  // Internal Pages (Bookmark Manager Tab, etc.)
+  // ==========================================
+
+  createInternalTab(title, pageId, icon = '📑') {
+    this.tabIdCounter++;
+    const tabId = this.tabIdCounter;
+
+    const tabData = {
+      id: tabId,
+      type: 'internal',
+      internalPage: pageId,
+      title: title,
+      url: pageId,
+      favicon: '', // emoji is in the tab template HTML directly
+    };
+
+    this.tabs.set(tabId, tabData);
+
+    // Create tab UI element
+    const tabEl = document.createElement('div');
+    tabEl.className = 'tab';
+    tabEl.dataset.tabId = tabId;
+    tabEl.innerHTML = `
+      <span class="tab-favicon">${icon}</span>
+      <span class="tab-title">${title}</span>
+      <button class="tab-close-btn" title="Close tab">
+        <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    `;
+
+    tabEl.addEventListener('click', (e) => {
+      if (!e.target.closest('.tab-close-btn')) {
+        this.switchToTab(tabId);
+      }
+    });
+
+    tabEl.querySelector('.tab-close-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.closeTab(tabId);
+    });
+
+    this.elements.tabContainer.appendChild(tabEl);
+    this.switchToTab(tabId);
+
+    return tabId;
   }
 
   closeTab(tabId) {
@@ -283,15 +351,28 @@ class InspectorBrowser {
     const tabEl = this.elements.tabContainer.querySelector(`.tab[data-tab-id="${tabId}"]`);
     if (tabEl) tabEl.remove();
 
-    // Destroy webview
-    if (tab.webview && tab.webview.parentNode) {
-      tab.webview.remove();
-    }
+    if (tab.type === 'internal') {
+      // Clean up internal page content
+      const pageEl = document.getElementById(tab.internalPage + '-page');
+      if (pageEl) {
+        pageEl.innerHTML = '';
+        pageEl.classList.remove('active');
+      }
+      this.tabs.delete(tabId);
 
-    // Remove from map
-    this.tabs.delete(tabId);
-    this.monitorData.delete(tabId);
-    window.electronAPI.closeTab(tabId);
+      // Notify the bookmarks manager if this was the bookmarks tab
+      if (this.bookmarks && this.bookmarks._bookmarksTabId === tabId) {
+        this.bookmarks._bookmarksTabId = null;
+      }
+    } else {
+      // Destroy webview
+      if (tab.webview && tab.webview.parentNode) {
+        tab.webview.remove();
+      }
+      this.tabs.delete(tabId);
+      this.monitorData.delete(tabId);
+      window.electronAPI.closeTab(tabId);
+    }
 
     // Switch to another tab if needed
     if (this.activeTabId === tabId) {
@@ -300,7 +381,10 @@ class InspectorBrowser {
         this.switchToTab(remainingTabs[remainingTabs.length - 1]);
       } else {
         this.activeTabId = null;
-        // Show empty state
+        // Hide internal pages, show empty webview state
+        if (this.elements.bookmarksPage) {
+          this.elements.bookmarksPage.classList.remove('active');
+        }
         this.elements.webviewContainer.innerHTML = '';
         this.elements.urlInput.value = '';
         this.elements.statusLeft.textContent = 'No open tabs';
@@ -343,6 +427,15 @@ class InspectorBrowser {
     const tab = this.tabs.get(tabId);
     if (!tab) return;
 
+    if (tab.type === 'internal') {
+      // Disable nav buttons for internal pages
+      this.elements.btnBack.disabled = true;
+      this.elements.btnForward.disabled = true;
+      this.elements.reloadIcon.innerHTML = '<path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>';
+      this.elements.urlLoading.style.display = 'none';
+      return;
+    }
+
     this.elements.btnBack.disabled = !tab.canGoBack;
     this.elements.btnForward.disabled = !tab.canGoForward;
 
@@ -361,6 +454,13 @@ class InspectorBrowser {
     const tab = this.tabs.get(tabId);
     if (!tab) return;
 
+    if (tab.type === 'internal') {
+      // Show page title in address bar
+      this.elements.urlInput.value = tab.title;
+      this.elements.urlBarSecurity.style.display = 'none';
+      return;
+    }
+
     if (document.activeElement !== this.elements.urlInput) {
       this.elements.urlInput.value = tab.url || '';
     }
@@ -370,6 +470,11 @@ class InspectorBrowser {
     if (tabId !== this.activeTabId) return;
     const tab = this.tabs.get(tabId);
     if (!tab || !tab.url) return;
+
+    if (tab.type === 'internal') {
+      this.elements.urlBarSecurity.style.display = 'none';
+      return;
+    }
 
     const isSecure = tab.url.startsWith('https://');
     this.elements.urlBarSecurity.style.display = tab.url !== 'about:blank' ? 'flex' : 'none';
@@ -461,7 +566,9 @@ class InspectorBrowser {
   // ==========================================
 
   setupMonitorPanel() {
-    // Tab switching in monitor panel
+    this.MONITOR_TAB_KEY = 'inspector-monitor-tab';
+
+    // Tab switching in monitor panel — save preference
     const monitorTabs = document.querySelectorAll('.monitor-tab');
     monitorTabs.forEach(tab => {
       tab.addEventListener('click', () => {
@@ -474,8 +581,28 @@ class InspectorBrowser {
         document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
         const panel = document.getElementById(`panel-${panelName}`);
         if (panel) panel.classList.add('active');
+
+        // Save preference
+        try {
+          localStorage.setItem(this.MONITOR_TAB_KEY, panelName);
+        } catch (e) { /* ignore */ }
       });
     });
+
+    // Restore saved monitor tab
+    try {
+      const savedTab = localStorage.getItem(this.MONITOR_TAB_KEY);
+      if (savedTab) {
+        const targetTab = document.querySelector(`.monitor-tab[data-panel="${savedTab}"]`);
+        const targetPanel = document.getElementById(`panel-${savedTab}`);
+        if (targetTab && targetPanel) {
+          document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+          targetTab.classList.add('active');
+          document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+          targetPanel.classList.add('active');
+        }
+      }
+    } catch (e) { /* ignore */ }
 
     // Clear button
     document.getElementById('monitor-clear').addEventListener('click', () => {
@@ -495,18 +622,29 @@ class InspectorBrowser {
       this.exportReport();
     });
 
+    // Close button inside monitor panel toolbar
+    const closeBtn = document.getElementById('monitor-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => this.hideMonitorPanel());
+    }
+
     // Toggle monitor panel
     document.getElementById('btn-monitor').addEventListener('click', () => {
       this.toggleMonitorPanel();
     });
 
-    // Toggle Chrome DevTools for the active tab
+    // Open Chrome DevTools for the active tab (via IPC to main process for reliability)
     document.getElementById('btn-devtools').addEventListener('click', () => {
       if (this.activeTabId) {
-        const tab = this.tabs.get(this.activeTabId);
-        if (tab && tab.webview) {
-          tab.webview.openDevTools();
-        }
+        window.electronAPI.openDevTools(this.activeTabId);
+      }
+    });
+
+    // Keyboard shortcut: Ctrl+B to toggle panel
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+        e.preventDefault();
+        this.toggleMonitorPanel();
       }
     });
 
@@ -518,6 +656,11 @@ class InspectorBrowser {
   toggleMonitorPanel() {
     const isHidden = this.elements.monitorPanel.classList.toggle('hidden');
     document.getElementById('btn-monitor').classList.toggle('nav-btn-active', !isHidden);
+  }
+
+  hideMonitorPanel() {
+    this.elements.monitorPanel.classList.add('hidden');
+    document.getElementById('btn-monitor').classList.remove('nav-btn-active');
   }
 
   getEmptyStateHTML(panelType) {
@@ -1307,6 +1450,9 @@ class BookmarksManager {
       modalCount: document.getElementById('bookmarks-modal-count'),
     };
 
+    this._bookmarksTabId = null;
+    this.pageContent = document.getElementById('bookmarks-page');
+
     this.initDragReorder();
     this.init();
   }
@@ -1350,11 +1496,26 @@ class BookmarksManager {
       this.save();
     }
 
-    this.render();
-    this.renderModal();
+    // Defer DOM rendering to after the first tab — makes startup faster
     this.bindEvents();
-    // Initialize bookmark button state for the active tab
-    this.updateBookmarkButton(this.browser.activeTabId);
+    this.renderDelayed();
+  }
+
+  renderDelayed() {
+    // Use requestAnimationFrame + setTimeout to render after the first paint
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        this.render();
+        this.renderModal();
+        this.updateBookmarkButton(this.browser.activeTabId);
+
+        // Log startup time for performance tracking
+        if (this.browser._startedAt) {
+          const elapsed = Math.round(performance.now() - this.browser._startedAt);
+          console.log(`Inspector Browser started in ${elapsed}ms`);
+        }
+      }, 0);
+    });
   }
 
   load() {
@@ -1395,6 +1556,7 @@ class BookmarksManager {
     this.save();
     this.render();
     this.renderModal();
+    this.refreshPage();
     this.updateBookmarkButton(this.browser.activeTabId);
     return true;
   }
@@ -1404,6 +1566,7 @@ class BookmarksManager {
     this.save();
     this.render();
     this.renderModal();
+    this.refreshPage();
     this.updateBookmarkButton(this.browser.activeTabId);
   }
 
@@ -1418,6 +1581,7 @@ class BookmarksManager {
     this.save();
     this.render();
     this.renderModal();
+    this.refreshPage();
   }
 
   hasCredentials(bm) {
@@ -1512,6 +1676,7 @@ class BookmarksManager {
     this.save();
     this.render();
     this.renderModal();
+    this.refreshPage();
     this.updateBookmarkButton(this.browser.activeTabId);
   }
 
@@ -1546,7 +1711,9 @@ class BookmarksManager {
     const isBelow = e.clientY > midY;
 
     // Remove previous drag-over classes from all items
-    this.elements.modalContent.querySelectorAll('.bookmarks-modal-item').forEach(el => {
+    // Get active container for removing drag-over classes
+    const container = this.pageContent?.classList.contains('active') ? this.pageContent : this.elements.modalContent;
+    container.querySelectorAll('.bookmarks-modal-item').forEach(el => {
       el.classList.remove('drag-over', 'drag-over-bottom');
     });
 
@@ -1592,9 +1759,15 @@ class BookmarksManager {
     this.dragState.draggedId = null;
     this.dragState.draggedEl = null;
 
+    // Clean up drag classes from both modal and page container
     this.elements.modalContent.querySelectorAll('.bookmarks-modal-item').forEach(el => {
       el.classList.remove('dragging', 'drag-over', 'drag-over-bottom');
     });
+    if (this.pageContent) {
+      this.pageContent.querySelectorAll('.bookmarks-modal-item').forEach(el => {
+        el.classList.remove('dragging', 'drag-over', 'drag-over-bottom');
+      });
+    }
   }
 
   renderModal() {
@@ -1774,6 +1947,9 @@ class BookmarksManager {
     const infoEl = itemEl.querySelector('.bookmarks-modal-item-info');
     const actionsEl = itemEl.querySelector('.bookmarks-modal-item-actions');
 
+    // Detect if we're in page mode (tab) vs modal mode
+    const isPageMode = this._bookmarksTabId && this.browser.tabs.get(this._bookmarksTabId);
+
     const decryptedPassword = bm.password ? this.constructor.decrypt(bm.password) : '';
 
     infoEl.innerHTML = `
@@ -1815,7 +1991,11 @@ class BookmarksManager {
     });
 
     document.getElementById('edit-cancel').addEventListener('click', () => {
-      this.renderModal();
+      if (isPageMode) {
+        this.refreshPage();
+      } else {
+        this.renderModal();
+      }
     });
 
     // Focus the title input
@@ -1866,9 +2046,9 @@ class BookmarksManager {
       this.toggle(tab.url, tab.title);
     });
 
-    // More / Manage button
+    // More / Manage button — opens as a tab, not a modal
     this.elements.moreBtn.addEventListener('click', () => {
-      this.openModal();
+      this.openAsTab();
     });
 
     // Modal close
@@ -1893,6 +2073,134 @@ class BookmarksManager {
     });
   }
 
+  // ==========================================
+  // Tab-based Bookmark Manager
+  // ==========================================
+
+  openAsTab() {
+    // If the tab is already open, just switch to it
+    if (this._bookmarksTabId) {
+      const tab = this.browser.tabs.get(this._bookmarksTabId);
+      if (tab) {
+        this.browser.switchToTab(this._bookmarksTabId);
+        return;
+      }
+    }
+
+    // Create a new internal tab for the bookmarks manager
+    this._bookmarksTabId = this.browser.createInternalTab('Bookmarks Manager', 'bookmarks', '⭐');
+
+    // Render the bookmark manager content into the page container
+    this.renderPage();
+  }
+
+  renderPage() {
+    if (!this.pageContent) return;
+
+    this.pageContent.innerHTML = `
+      <div class="bookmarks-manager-header">
+        <h2>Bookmarks Manager</h2>
+        <span class="bookmarks-manager-count">${this.bookmarks.length} bookmark${this.bookmarks.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="bookmarks-manager-list"></div>
+    `;
+
+    const listContainer = this.pageContent.querySelector('.bookmarks-manager-list');
+    if (!listContainer) return;
+
+    if (this.bookmarks.length === 0) {
+      listContainer.innerHTML = '<div class="bookmarks-modal-empty">No bookmarks yet. Click the ★ star in the address bar to bookmark a page.</div>';
+      return;
+    }
+
+    this.bookmarks.forEach(bm => {
+      const item = document.createElement('div');
+      item.className = 'bookmarks-modal-item';
+      item.dataset.id = bm.id;
+      item.draggable = true;
+
+      const icon = this.browser.getBookmarkIcon(bm.url);
+      const hasCreds = this.hasCredentials(bm);
+
+      item.innerHTML = `
+        <span class="bookmarks-modal-grip" title="Drag to reorder">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+        </span>
+        <span class="bookmarks-modal-item-icon">${hasCreds ? '🔐' : icon}</span>
+        <div class="bookmarks-modal-item-info">
+          <div class="bookmarks-modal-item-title">${this.browser.escapeHtml(bm.title)}</div>
+          <div class="bookmarks-modal-item-url">${this.browser.escapeHtml(bm.url)}</div>
+          ${hasCreds ? `
+            <div class="bookmarks-modal-creds-row">
+              <span class="bookmarks-modal-creds-badge">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                Saved credentials
+              </span>
+              <button class="bookmarks-modal-creds-reveal" data-bm-id="${bm.id}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                Reveal
+              </button>
+            </div>
+          ` : ''}
+        </div>
+        <div class="bookmarks-modal-item-actions">
+          <button class="bookmarks-modal-item-btn edit" title="Edit bookmark">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+          </button>
+          <button class="bookmarks-modal-item-btn" title="Remove bookmark">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+          </button>
+        </div>
+      `;
+
+      // Click to navigate
+      item.addEventListener('click', (e) => {
+        if (!e.target.closest('.bookmarks-modal-item-btn') && !e.target.closest('.bookmarks-modal-grip') && !e.target.closest('.bookmarks-modal-creds-reveal') && !e.target.closest('.bookmarks-modal-creds-popup')) {
+          this.navigateTo(bm.url);
+        }
+      });
+
+      // Remove
+      const removeBtn = item.querySelectorAll('.bookmarks-modal-item-btn')[1];
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.remove(bm.id);
+      });
+
+      // Edit
+      item.querySelector('.edit').addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.startEdit(bm, item);
+      });
+
+      // Reveal credentials
+      const revealBtn = item.querySelector('.bookmarks-modal-creds-reveal');
+      if (revealBtn) {
+        revealBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.revealCredentials(bm, item);
+        });
+      }
+
+      // Drag events
+      item.addEventListener('dragstart', (e) => this.onDragStart(e, bm));
+      item.addEventListener('dragover', (e) => this.onDragOver(e));
+      item.addEventListener('dragenter', (e) => e.preventDefault());
+      item.addEventListener('dragleave', (e) => this.onDragLeave(e));
+      item.addEventListener('drop', (e) => this.onDrop(e));
+      item.addEventListener('dragend', (e) => this.onDragEnd(e));
+
+      listContainer.appendChild(item);
+    });
+  }
+
+  refreshPage() {
+    // Refresh both the page and the modal when data changes
+    if (this._bookmarksTabId && this.browser.tabs.get(this._bookmarksTabId)) {
+      this.renderPage();
+    }
+  }
+
   openModal() {
     this.renderModal();
     this.elements.modalOverlay.style.display = 'flex';
@@ -1904,17 +2212,22 @@ class BookmarksManager {
 }
 
 // ==========================================
-// Initialize
+// Initialize — optimized for fast startup
 // ==========================================
 
-// Wait for DOM and electronAPI
 document.addEventListener('DOMContentLoaded', () => {
-  // Wait a tick for electronAPI to be ready
-  setTimeout(() => {
-    const browser = new InspectorBrowser();
-    window.inspectorBrowser = browser;
+  const browser = new InspectorBrowser();
+  window.inspectorBrowser = browser;
 
-    // Create initial tab
-    browser.createNewTab('https://www.google.com');
-  }, 100);
+  // Create initial tab with about:blank for near-instant webview init,
+  // then navigate to the default page after the webview is ready.
+  // This splits startup load: window appears immediately, page loads after.
+  const tabId = browser.createNewTab('about:blank');
+  const tab = browser.tabs.get(tabId);
+  // Navigate to the default page once the webview's renderer is ready
+  if (tab?.webview) {
+    tab.webview.addEventListener('dom-ready', () => {
+      browser.navigateTo(tabId, 'https://www.google.com');
+    }, { once: true });
+  }
 });

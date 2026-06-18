@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "dgSpecHash": "Xmwa7htnaDU=",
+  "success": true,
+  "projectFilePath": "S:\\repos\\PerformanceBrowser\\PerformanceBrowser.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\hazem\\.nuget\\packages\\cefsharp.common\\131.3.50\\cefsharp.common.131.3.50.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\cefsharp.common.netcore\\131.3.50\\cefsharp.common.netcore.131.3.50.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\cefsharp.winforms\\131.3.50\\cefsharp.winforms.131.3.50.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\cefsharp.winforms.netcore\\131.3.50\\cefsharp.winforms.netcore.131.3.50.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\chromiumembeddedframework.runtime\\131.3.5\\chromiumembeddedframework.runtime.131.3.5.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\chromiumembeddedframework.runtime.win-arm64\\131.3.5\\chromiumembeddedframework.runtime.win-arm64.131.3.5.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\chromiumembeddedframework.runtime.win-x64\\131.3.5\\chromiumembeddedframework.runtime.win-x64.131.3.5.nupkg.sha512",
+    "C:\\Users\\hazem\\.nuget\\packages\\chromiumembeddedframework.runtime.win-x86\\131.3.5\\chromiumembeddedframework.runtime.win-x86.131.3.5.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1701",
+      "level": "Warning",
+      "warningLevel": 1,
+      "message": "Package 'CefSharp.WinForms 131.3.50' was restored using '.NETFramework,Version=v4.6.1, .NETFramework,Version=v4.6.2, .NETFramework,Version=v4.7, .NETFramework,Version=v4.7.1, .NETFramework,Version=v4.7.2, .NETFramework,Version=v4.8, .NETFramework,Version=v4.8.1' instead of the project target framework 'net8.0-windows7.0'. This package may not be fully compatible with your project.",
+      "libraryId": "CefSharp.WinForms",
+      "targetGraphs": [
+        "net8.0-windows7.0"
+      ]
+    }
+  ]
+}

@@ -375,10 +375,19 @@ function setupIPC() {
     }
   });
 
+  // Open DevTools for a tab
+  ipcMain.on('devtools:open', (event, tabId) => {
+    const tab = tabs.get(tabId);
+    if (tab && tab.webContents) {
+      tab.webContents.openDevTools();
+    }
+  });
+
   // Run style audit on a tab
   ipcMain.handle('monitor:styleAudit', async (event, tabId) => {
     const tab = tabs.get(tabId);
-    if (!tab || !tab.webContents) return [];
+    // Return null to signal that the audit couldn't run (webview not registered)
+    if (!tab || !tab.webContents) return null;
 
     try {
       const issues = await tab.webContents.executeJavaScript(`
@@ -481,7 +490,8 @@ function setupIPC() {
   // Run security scan on a tab
   ipcMain.handle('monitor:securityScan', async (event, tabId) => {
     const tab = tabs.get(tabId);
-    if (!tab || !tab.webContents) return [];
+    // Return null to signal that the scan couldn't run (webview not registered)
+    if (!tab || !tab.webContents) return null;
 
     try {
       const issues = await tab.webContents.executeJavaScript(`

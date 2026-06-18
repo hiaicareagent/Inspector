@@ -1,0 +1,16 @@
+S:\repos\PerformanceBrowser\bin\Debug\net8.0-windows\PerformanceBrowser.exe
+S:\repos\PerformanceBrowser\bin\Debug\net8.0-windows\PerformanceBrowser.deps.json
+S:\repos\PerformanceBrowser\bin\Debug\net8.0-windows\PerformanceBrowser.runtimeconfig.json
+S:\repos\PerformanceBrowser\bin\Debug\net8.0-windows\PerformanceBrowser.dll
+S:\repos\PerformanceBrowser\bin\Debug\net8.0-windows\PerformanceBrowser.pdb
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.Form1.resources
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.csproj.GenerateResource.cache
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.GeneratedMSBuildEditorConfig.editorconfig
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.AssemblyInfoInputs.cache
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.AssemblyInfo.cs
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.csproj.CoreCompileInputs.cache
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.dll
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\refint\PerformanceBrowser.dll
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.pdb
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\PerformanceBrowser.genruntimeconfig.cache
+S:\repos\PerformanceBrowser\obj\Debug\net8.0-windows\ref\PerformanceBrowser.dll

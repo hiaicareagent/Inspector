@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Report export
   saveReport: (reportData) => ipcRenderer.invoke('export:saveReport', reportData),
 
+  // DevTools
+  openDevTools: (tabId) => ipcRenderer.send('devtools:open', tabId),
+
   // Window controls
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
