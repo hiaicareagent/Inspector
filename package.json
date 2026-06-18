@@ -1,0 +1,41 @@
+{
+  "name": "inspector-browser",
+  "version": "1.0.0",
+  "description": "Enterprise Web Application Monitor Browser - Chromium-based with performance, security, and style auditing",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable",
+    "build:dir": "electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.inspector.browser",
+    "productName": "Inspector",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": null,
+      "artifactName": "Inspector-Browser-${version}-portable.exe"
+    },
+    "portable": {
+      "artifactName": "Inspector-Browser-portable.exe"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "package.json"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

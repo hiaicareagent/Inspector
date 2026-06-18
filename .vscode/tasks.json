@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Serve site",
+      "type": "shell",
+      "command": "py -m http.server 8000",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}
