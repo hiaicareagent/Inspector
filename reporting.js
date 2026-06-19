@@ -45,7 +45,9 @@ class ReportAggregator {
     clinicalSLABreaches, nonClinicalSLABreaches, highErrorRateEndpoints,
     clinicalAPIErrors, silentFailures, thirdPartyDependencies,
     staleDataFlags, valueNotRendered, valueTruncated,
-    allergyAlertNotVisible, formPrepopulationMismatches
+    allergyAlertNotVisible, formPrepopulationMismatches,
+    networkConditionTests, offlineWarningMissing, reconnectionSyncFailures,
+    serviceWorkerAudit, criticalCacheMissing, degradedModeFreezes
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -108,6 +110,14 @@ class ReportAggregator {
     this.valueTruncated = valueTruncated || [];
     this.allergyAlertNotVisible = allergyAlertNotVisible || [];
     this.formPrepopulationMismatches = formPrepopulationMismatches || [];
+
+    // Pillar 9 — Offline / Resilience
+    this.networkConditionTests = networkConditionTests || [];
+    this.offlineWarningMissing = offlineWarningMissing || [];
+    this.reconnectionSyncFailures = reconnectionSyncFailures || [];
+    this.serviceWorkerAudit = serviceWorkerAudit || [];
+    this.criticalCacheMissing = criticalCacheMissing || [];
+    this.degradedModeFreezes = degradedModeFreezes || [];
   }
 
   /** ─── Compute Scores ─── */
@@ -132,6 +142,9 @@ class ReportAggregator {
     s -= (this.allergyAlertNotVisible || []).length * 40;
     s -= (this.valueTruncated || []).length * 30;
     s -= (this.formPrepopulationMismatches || []).length * 35;
+    // Pillar 9 deductions
+    s -= (this.offlineWarningMissing || []).length * 20;
+    s -= (this.reconnectionSyncFailures || []).length * 25;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -164,6 +177,8 @@ class ReportAggregator {
     s -= (this.nonClinicalSLABreaches || []).length * 5;
     // Pillar 8 deductions
     s -= (this.staleDataFlags || []).length * 10;
+    // Pillar 9 deductions
+    s -= (this.degradedModeFreezes || []).length * 15;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -222,6 +237,19 @@ class ReportAggregator {
     }
     for (const b of (this.clinicalSLABreaches || [])) {
       flags.push({ severity: 'warning', type: 'CLINICAL_SLA_BREACH', message: `${b.endpoint} took ${b.duration}ms (threshold ${b.threshold}ms)`, timestamp: b.timestamp });
+    }
+    // Pillar 9 — Offline flags
+    for (const o of (this.offlineWarningMissing || [])) {
+      flags.push({ severity: 'critical', type: 'OFFLINE_WARNING_MISSING', message: 'No offline warning shown for ' + Math.round((o.offlineDurationMs||0)/1000) + 's', timestamp: o.timestamp });
+    }
+    for (const r of (this.reconnectionSyncFailures || [])) {
+      flags.push({ severity: 'critical', type: 'RECONNECTION_SYNC_FAILURE', message: 'No data refresh after reconnection (' + Math.round((r.outageDuration||0)/1000) + 's outage)', timestamp: r.timestamp });
+    }
+    for (const d of (this.degradedModeFreezes || [])) {
+      flags.push({ severity: 'warning', type: 'DEGRADED_MODE_SILENT_FREEZE', message: 'Request to ' + (d.endpoint||'') + ' timed out >10s without loading indicator', timestamp: d.timestamp });
+    }
+    for (const c of (this.criticalCacheMissing || [])) {
+      flags.push({ severity: 'warning', type: 'NO_OFFLINE_CACHE_FOR_CRITICAL_DATA', message: 'Missing cache keys: ' + (c.missingKeys||[]).join(', '), timestamp: c.timestamp });
     }
     // Deduplicate by type+message
     const seen = new Set();
@@ -681,6 +709,62 @@ class ReportAggregator {
             expectedValue: f.expectedValue,
             renderedValue: f.renderedValue,
             timestamp: f.timestamp,
+          })),
+        },
+      },
+
+      // ════════════════════════════════════════
+      // Offline / Resilience Section (Pillar 9)
+      // ════════════════════════════════════════
+      offlineResilience: {
+        networkConditionTests: {
+          total: this.networkConditionTests.length,
+          tests: this.networkConditionTests.slice(-50).map(t => ({
+            preset: t.preset, offline: t.offline, latency: t.latency,
+            downloadThroughput: t.downloadThroughput, uploadThroughput: t.uploadThroughput,
+            timestamp: t.timestamp,
+          })),
+        },
+        offlineWarningMissing: {
+          total: this.offlineWarningMissing.length,
+          incidents: this.offlineWarningMissing.slice(-50).map(o => ({
+            offlineDurationMs: o.offlineDurationMs,
+            timestamp: o.timestamp,
+          })),
+        },
+        reconnectionSyncFailures: {
+          total: this.reconnectionSyncFailures.length,
+          failures: this.reconnectionSyncFailures.slice(-50).map(r => ({
+            outageDuration: r.outageDuration,
+            restoredAt: r.restoredAt,
+            timestamp: r.timestamp,
+          })),
+        },
+        serviceWorkerAudit: {
+          total: this.serviceWorkerAudit.length,
+          audits: this.serviceWorkerAudit.slice(-50).map(s => ({
+            registrations: s.registrations || [],
+            criticalCacheKeysFound: s.criticalCacheKeysFound || [],
+            criticalCacheKeysMissing: s.criticalCacheKeysMissing || [],
+            hasAllCriticalKeys: s.hasAllCriticalKeys,
+            cacheApiUnavailable: s.cacheApiUnavailable,
+            timestamp: s.timestamp,
+          })),
+        },
+        criticalCacheMissing: {
+          total: this.criticalCacheMissing.length,
+          entries: this.criticalCacheMissing.slice(-50).map(c => ({
+            missingKeys: c.missingKeys,
+            timestamp: c.timestamp,
+          })),
+        },
+        degradedModeFreezes: {
+          total: this.degradedModeFreezes.length,
+          freezes: this.degradedModeFreezes.slice(-50).map(d => ({
+            endpoint: d.endpoint,
+            duration: d.duration,
+            noLoadingIndicator: d.noLoadingIndicator,
+            timestamp: d.timestamp,
           })),
         },
       },

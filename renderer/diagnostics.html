@@ -5,6 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Inspector — Diagnostics</title>
   <link rel="stylesheet" href="styles.css">
+  <style>
+    .network-controls { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin: 8px 12px 0; overflow: hidden; }
+    .network-buttons { display: flex; gap: 6px; padding: 8px 14px 10px; flex-wrap: wrap; }
+    .network-btn { padding: 6px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; font-size: 11px; font-weight: 600; transition: all 150ms ease; }
+    .network-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .network-btn.active { color: #fff; }
+    .network-offline.active { background: #f85149; border-color: #f85149; }
+    .network-2g.active { background: #d29922; border-color: #d29922; }
+    .network-3g.active { background: #58a6ff; border-color: #58a6ff; }
+    .network-normal.active { background: #3fb950; border-color: #3fb950; }
+    .network-mode { font-size: 11px; color: var(--text-secondary); }
+    .network-mode strong { color: var(--text-primary); }
+    .network-stats { padding: 0 14px 8px; font-size: 10px; color: var(--text-muted); }
+  </style>
 </head>
 <body>
   <div id="app">
@@ -45,6 +59,23 @@
       <div class="score-card score-summary" id="score-overall">
         <div class="score-label">Overall</div>
         <div class="score-value" id="overall-score-value">—</div>
+      </div>
+    </div>
+
+    <!-- Network Simulation Controls (Pillar 9) -->
+    <div class="network-controls">
+      <div class="section-header" style="cursor:default;border-radius:6px 6px 0 0;">
+        <h2 class="section-title"><span class="section-icon">🌐</span>Network Simulation</h2>
+        <div class="network-mode" id="network-mode">Mode: <strong>Normal</strong></div>
+      </div>
+      <div class="network-buttons">
+        <button class="network-btn network-offline" data-preset="offline">Offline</button>
+        <button class="network-btn network-2g" data-preset="2G">2G</button>
+        <button class="network-btn network-3g" data-preset="3G">3G</button>
+        <button class="network-btn network-normal" data-preset="normal">Normal</button>
+      </div>
+      <div class="network-stats">
+        <span class="network-stat" id="network-failures">Failures: 0</span>
       </div>
     </div>
 
@@ -310,6 +341,32 @@
       overlayVisible = !overlayVisible;
       overlay.style.display = overlayVisible ? 'flex' : 'none';
     });
+
+    // ── Network Simulation Controls ──
+    document.querySelectorAll('.network-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var preset = this.getAttribute('data-preset');
+        document.querySelectorAll('.network-btn').forEach(function(b) { b.classList.remove('active'); });
+        this.classList.add('active');
+        window.inspector.setNetworkCondition(preset).then(function(result) {
+          if (result.success) {
+            document.getElementById('network-mode').innerHTML = 'Mode: <strong>' + preset.charAt(0).toUpperCase() + preset.slice(1) + '</strong>';
+          }
+        }).catch(function() {});
+      });
+    });
+
+    // Update network stats periodically
+    function updateNetworkStats() {
+      window.inspector.getOfflineCounts().then(function(counts) {
+        var totalFailures = counts.offlineWarningMissing + counts.reconnectionSyncFailures + counts.degradedModeFreezes;
+        document.getElementById('network-failures').textContent = 'Failures: ' + totalFailures;
+      }).catch(function() {});
+    }
+    setInterval(updateNetworkStats, 5000);
+    // Also update on dashboard refresh
+    var origUpdate = updateDashboard;
+    updateDashboard = function() { origUpdate(); updateNetworkStats(); };
 
     // Window controls
     document.addEventListener('keydown', (e) => {

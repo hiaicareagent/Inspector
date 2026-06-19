@@ -136,6 +136,25 @@ const valueTruncated = [];
 const allergyAlertNotVisible = [];
 const formPrepopulationMismatches = [];
 
+// ── Offline / Resilience stores (Pillar 9) ──
+const networkConditionTests = [];
+const offlineWarningMissing = [];
+const reconnectionSyncFailures = [];
+const serviceWorkerAudit = [];
+const criticalCacheMissing = [];
+const degradedModeFreezes = [];
+let currentNetworkCondition = "normal";
+let lastOfflineTimestamp = null;
+let offlineTimer = null;
+
+const NETWORK_PRESETS = {
+  offline: { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
+  "2G": { offline: false, latency: 300, downloadThroughput: 6400, uploadThroughput: 2560 },
+  "3G": { offline: false, latency: 100, downloadThroughput: 37500, uploadThroughput: 10240 },
+  normal: { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
+};
+
+
 const STALE_THRESHOLDS = {
   '/vitals': 5 * 60 * 1000,
   '/medications': 10 * 60 * 1000,
@@ -143,6 +162,9 @@ const STALE_THRESHOLDS = {
 };
 
 let staleDataTimer = null;
+
+// ── CRITICAL_CACHE_KEYS for service worker audit (Pillar 9) ──
+const CRITICAL_CACHE_KEYS = ["patient-demographics", "active-medications", "allergies"];
 
 // ── UX-specific stores (Pillar 3) ──
 const rageClicks = [];
@@ -990,6 +1012,96 @@ function getFailingDependencies() {
     }
   }
   return failing;
+}
+
+// ──────────────────────────────────────────────
+// Network Degradation Simulation (Pillar 9)
+// ──────────────────────────────────────────────
+
+function setupNetworkSimulation() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  try {
+    const dbg = mainWindow.webContents.debugger;
+    if (!dbg.isAttached()) { dbg.attach('1.3'); }
+    // Ensure Network domain is enabled
+    dbg.sendCommand('Network.enable', { maxTotalBufferSize: 10000000 });
+    console.log('[Inspector:Network] Network simulation ready.');
+  } catch (err) {
+    console.warn('[Inspector:Network] Could not setup network simulation:', err.message);
+  }
+}
+
+async function applyNetworkCondition(presetName) {
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false, error: 'No window' };
+
+  const preset = NETWORK_PRESETS[presetName];
+  if (!preset) return { success: false, error: 'Unknown preset: ' + presetName };
+
+  try {
+    const dbg = mainWindow.webContents.debugger;
+    if (!dbg.isAttached()) { dbg.attach('1.3'); }
+
+    await dbg.sendCommand('Network.emulateNetworkConditions', preset);
+    currentNetworkCondition = presetName;
+
+    const entry = { preset: presetName, offline: preset.offline, latency: preset.latency, downloadThroughput: preset.downloadThroughput, uploadThroughput: preset.uploadThroughput, timestamp: new Date().toISOString() };
+    networkConditionTests.push(entry);
+
+    console.log('[Inspector:Network] Network condition set to:', presetName);
+    return { success: true, preset: presetName };
+  } catch (err) {
+    console.warn('[Inspector:Network] Failed to apply network condition:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ──────────────────────────────────────────────
+// Offline State Monitoring (Pillar 9)
+// ──────────────────────────────────────────────
+
+function startOfflineCheck() {
+  if (offlineTimer) return;
+  offlineTimer = setInterval(checkOfflineState, 5000);
+}
+
+function stopOfflineCheck() {
+  if (offlineTimer) { clearInterval(offlineTimer); offlineTimer = null; }
+}
+
+function checkOfflineState() {
+  // If we recorded an offline timestamp and it was more than 5s ago
+  if (!lastOfflineTimestamp || !mainWindow || mainWindow.isDestroyed()) return;
+
+  const offlineDurationMs = Date.now() - lastOfflineTimestamp;
+  if (offlineDurationMs < 5000) return;
+
+  // Check if DOM shows an offline warning
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      try {
+        var body = document.body;
+        if (!body) return null;
+        var text = (body.innerText || body.textContent || '').substring(0, 5000).toLowerCase();
+        var hasOfflineWarning = !!document.querySelector('[class*="offline"], [class*="disconnected"], [role="alert"]:not([aria-hidden])');
+        var hasOfflineText = /offline|no connection|disconnected|check your network|you are offline|connection lost/i.test(text);
+        return JSON.stringify({ hasOfflineWarning: hasOfflineWarning, hasOfflineText: hasOfflineText });
+      } catch(e) { return null; }
+    })()
+  `).then(function(result) {
+    if (result) {
+      try {
+        var parsed = JSON.parse(result);
+        if (!parsed.hasOfflineWarning && !parsed.hasOfflineText) {
+          if (!offlineWarningMissing.find(o => Math.abs(new Date(o.timestamp) - Date.now()) < 30000)) {
+            var entry = { offlineDurationMs: offlineDurationMs, timestamp: new Date().toISOString() };
+            offlineWarningMissing.push(entry);
+            console.warn('[Inspector:Offline] ⚠ OFFLINE_WARNING_MISSING: No offline warning shown for ' + Math.round(offlineDurationMs/1000) + 's');
+          }
+        }
+      } catch(e) {}
+    }
+  }).catch(function() {});
 }
 
 function getEndpointSummary() {
@@ -2255,6 +2367,88 @@ function injectAxeScanner(force) {
 }
 
 // ──────────────────────────────────────────────
+// Inject Service Worker Audit (Pillar 9)
+// ──────────────────────────────────────────────
+
+function injectServiceWorkerAudit() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorSWInjected) return;
+      window.__inspectorSWInjected = true;
+
+      if (!navigator.serviceWorker) return;
+
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        var swInfo = [];
+        for (var si = 0; si < registrations.length; si++) {
+          var reg = registrations[si];
+          var active = reg.active || reg.installing || reg.waiting || null;
+          swInfo.push({
+            scope: reg.scope || '',
+            scriptURL: active ? active.scriptURL : '',
+            state: active ? active.state : 'unknown',
+          });
+        }
+
+        // Check Cache Storage for critical keys
+        var cacheKeysFound = false;
+        if (typeof caches !== 'undefined') {
+          caches.keys().then(function(cacheNames) {
+            var criticalKeys = ['patient-demographics', 'active-medications', 'allergies'];
+            var foundKeys = [];
+            var foundCount = 0;
+            Promise.all(cacheNames.map(function(cacheName) {
+              return caches.open(cacheName).then(function(cache) {
+                return cache.keys().then(function(requests) {
+                  for (var ri = 0; ri < requests.length; ri++) {
+                    var url = requests[ri].url || '';
+                    for (var ki = 0; ki < criticalKeys.length; ki++) {
+                      if (url.includes(criticalKeys[ki])) {
+                        foundKeys.push(criticalKeys[ki]);
+                        foundCount++;
+                      }
+                    }
+                  }
+                });
+              });
+            })).then(function() {
+              var missingKeys = criticalKeys.filter(function(k) { return foundKeys.indexOf(k) === -1; });
+              window.inspector.reportOfflineEvent('serviceWorkerAudit', {
+                registrations: swInfo,
+                criticalCacheKeysFound: foundKeys,
+                criticalCacheKeysMissing: missingKeys,
+                hasAllCriticalKeys: missingKeys.length === 0,
+              });
+            });
+          });
+        } else {
+          // Cache Storage API not available
+          window.inspector.reportOfflineEvent('serviceWorkerAudit', {
+            registrations: swInfo,
+            criticalCacheKeysFound: [],
+            criticalCacheKeysMissing: ['patient-demographics', 'active-medications', 'allergies'],
+            hasAllCriticalKeys: false,
+            cacheApiUnavailable: true,
+          });
+        }
+      }).catch(function(err) {
+        console.warn('[Inspector] SW audit error:', err.message);
+      });
+
+      // Reset flag on SPA navigation
+      var swPushState = history.pushState;
+      history.pushState = function() { swPushState.apply(this, arguments); window.__inspectorSWInjected = false; };
+      var swReplaceState = history.replaceState;
+      history.replaceState = function() { swReplaceState.apply(this, arguments); window.__inspectorSWInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector] Could not inject service worker audit:', err.message);
+  });
+}
+
+// ──────────────────────────────────────────────
 // IPC Handlers
 // ──────────────────────────────────────────────
 
@@ -2576,6 +2770,72 @@ function setupIPC() {
     };
   });
 
+  // ── Offline / Resilience IPC (Pillar 9) ──
+
+  ipcMain.handle('inspector:setNetworkCondition', async (_event, presetName) => {
+    return await applyNetworkCondition(presetName);
+  });
+
+  ipcMain.handle('inspector:getCurrentNetworkCondition', async () => {
+    return { condition: currentNetworkCondition };
+  });
+
+  ipcMain.on('inspector:offlineDetected', (_event, { timestamp }) => {
+    lastOfflineTimestamp = timestamp || Date.now();
+    console.log('[Inspector:Offline] Offline detected at', new Date(lastOfflineTimestamp).toISOString());
+  });
+
+  ipcMain.on('inspector:onlineRestored', (_event, { timestamp, outageDuration }) => {
+    if (lastOfflineTimestamp) {
+      console.log('[Inspector:Offline] Online restored after', Math.round(outageDuration / 1000), 's outage');
+
+      // Check if data refreshes automatically within 10s
+      var beforeOnline = Date.now();
+      setTimeout(function() {
+        // Check for recent API requests after reconnection
+        var now = Date.now();
+        var timeSinceRestore = now - beforeOnline;
+        // If no re-fetch occurred, flag
+        if (timeSinceRestore >= 10000) {
+          if (!reconnectionSyncFailures.find(r => Math.abs(new Date(r.timestamp) - now) < 60000)) {
+            var entry = { outageDuration: outageDuration, restoredAt: new Date(timestamp).toISOString(), timestamp: new Date().toISOString() };
+            reconnectionSyncFailures.push(entry);
+            console.warn('[Inspector:Offline] ⚠ RECONNECTION_SYNC_FAILURE: No data refresh after reconnection');
+          }
+        }
+      }, 10000);
+    }
+    lastOfflineTimestamp = null;
+  });
+
+  ipcMain.on('inspector:reportOfflineEvent', (_event, { type, data }) => {
+    var entry = { ...data, timestamp: new Date().toISOString() };
+
+    if (type === 'serviceWorkerAudit') {
+      serviceWorkerAudit.push(entry);
+      if (data.criticalCacheKeysMissing && data.criticalCacheKeysMissing.length > 0) {
+        var cacheEntry = { missingKeys: data.criticalCacheKeysMissing, timestamp: entry.timestamp };
+        criticalCacheMissing.push(cacheEntry);
+        console.warn('[Inspector:Offline] ⚠ NO_OFFLINE_CACHE_FOR_CRITICAL_DATA: Missing keys:', data.criticalCacheKeysMissing.join(', '));
+      }
+    }
+    if (type === 'degradedModeFreeze') {
+      degradedModeFreezes.push(entry);
+      console.warn('[Inspector:Offline] ⚠ DEGRADED_MODE_SILENT_FREEZE: Request timed out >10s on', data.endpoint || data.url);
+    }
+  });
+
+  ipcMain.handle('inspector:getOfflineCounts', async () => {
+    return {
+      networkConditionTests: networkConditionTests.length,
+      offlineWarningMissing: offlineWarningMissing.length,
+      reconnectionSyncFailures: reconnectionSyncFailures.length,
+      serviceWorkerAudit: serviceWorkerAudit.length,
+      criticalCacheMissing: criticalCacheMissing.length,
+      degradedModeFreezes: degradedModeFreezes.length,
+    };
+  });
+
   ipcMain.handle('inspector:getSummaryScores', async () => {
     const complianceScore = _computeComplianceScore();
     const uxScore = _computeUXScore();
@@ -2614,6 +2874,9 @@ function _computeComplianceScore() {
   score -= allergyAlertNotVisible.length * 40;
   score -= valueTruncated.length * 30;
   score -= formPrepopulationMismatches.length * 35;
+  // Pillar 9 deductions
+  score -= offlineWarningMissing.length * 20;
+  score -= reconnectionSyncFailures.length * 25;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2651,6 +2914,8 @@ function _computePerformanceScore() {
   score -= nonClinicalSLABreaches.length * 5;
   // Pillar 8 deductions
   score -= staleDataFlags.length * 10;
+  // Pillar 9 deductions
+  score -= degradedModeFreezes.length * 15;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2669,8 +2934,10 @@ app.whenReady().then(() => {
   startTrace();
   setupNetworkInterception();
   setupAPIHealthMonitoring();
+  setupNetworkSimulation();
   startStaleDataDetection();
   startAutoLogoffAudit();
+  startOfflineCheck();
 
   mainWindow.webContents.on('did-finish-load', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -2690,6 +2957,8 @@ app.whenReady().then(() => {
     injectLoginLogoutDetector();
     // Pillar 8
     injectDataIntegrityScanners();
+    // Pillar 9
+    injectServiceWorkerAudit();
   });
 
   app.on('activate', () => {
@@ -2700,6 +2969,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   stopMemoryMonitoring();
   stopStaleDataDetection();
+  stopOfflineCheck();
   stopAutoLogoffAudit();
   if (process.platform !== 'darwin') app.quit();
 });

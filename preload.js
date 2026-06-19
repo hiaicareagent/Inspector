@@ -65,6 +65,35 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getDataIntegrityCounts');
   },
 
+  // ── Offline / Resilience (Pillar 9) ──
+  setNetworkCondition: (preset) => {
+    return ipcRenderer.invoke('inspector:setNetworkCondition', preset);
+  },
+  getCurrentNetworkCondition: () => {
+    return ipcRenderer.invoke('inspector:getCurrentNetworkCondition');
+  },
+  reportOfflineEvent: (type, data) => {
+    ipcRenderer.send('inspector:reportOfflineEvent', { type, data });
+  },
+  getOfflineCounts: () => {
+    return ipcRenderer.invoke('inspector:getOfflineCounts');
+  },
+
+  // ── Network condition event listeners (auto-detection) ──
+  _initNetworkDetection: (() => {
+    var _offlineStarted = null;
+    window.addEventListener('offline', () => {
+      _offlineStarted = Date.now();
+      ipcRenderer.send('inspector:offlineDetected', { timestamp: Date.now() });
+    });
+    window.addEventListener('online', () => {
+      var duration = _offlineStarted ? Date.now() - _offlineStarted : 0;
+      ipcRenderer.send('inspector:onlineRestored', { timestamp: Date.now(), outageDuration: duration });
+      _offlineStarted = null;
+    });
+    return true;
+  })(),
+
   // ── API Health (Pillar 7) ──
   getApiHealthCounts: () => {
     return ipcRenderer.invoke('inspector:getApiHealthCounts');
@@ -105,6 +134,82 @@ contextBridge.exposeInMainWorld('inspector', {
   onReady: (callback) => {
     ipcRenderer.on('inspector:ready', (_event, data) => callback(data));
   },
+
+  // ── Degraded mode freeze detection (Pillar 9, auto-initialized) ──
+  _initDegradedModeDetection: (() => {
+    // Track long-running requests during degraded network
+    var requestTimers = {};
+    var originalFetch = window.fetch;
+    window.fetch = function() {
+      var url = arguments[0];
+      var startTime = Date.now();
+      var requestId = Math.random().toString(36).substring(2, 10);
+      requestTimers[requestId] = { url: url, startTime: startTime };
+
+      // Check for loading indicator
+      setTimeout(function() {
+        if (requestTimers[requestId]) {
+          var body = document.body;
+          if (body) {
+            var hasLoading = !!document.querySelector('[class*="loading"], [class*="spinner"], [class*="skeleton"], [role="progressbar"]');
+            if (!hasLoading) {
+              ipcRenderer.send('inspector:reportOfflineEvent', {
+                type: 'degradedModeFreeze',
+                data: {
+                  endpoint: typeof url === 'string' ? url : (url.url || 'unknown'),
+                  duration: Date.now() - startTime,
+                  noLoadingIndicator: true,
+                }
+              });
+            }
+          }
+          delete requestTimers[requestId];
+        }
+      }, 10000);
+
+      return originalFetch.apply(this, arguments).then(function(resp) {
+        delete requestTimers[requestId];
+        return resp;
+      }).catch(function(err) {
+        delete requestTimers[requestId];
+        throw err;
+      });
+    };
+
+    // Also track XMLHttpRequest
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this._inspectorUrl = url;
+      this._inspectorStartTime = Date.now();
+      return origOpen.apply(this, arguments);
+    };
+
+    var origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function() {
+      var self = this;
+      var requestId = Math.random().toString(36).substring(2, 10);
+      var timer = setTimeout(function() {
+        var body = document.body;
+        if (body) {
+          var hasLoading = !!document.querySelector('[class*="loading"], [class*="spinner"], [class*="skeleton"], [role="progressbar"]');
+          if (!hasLoading) {
+            ipcRenderer.send('inspector:reportOfflineEvent', {
+              type: 'degradedModeFreeze',
+              data: {
+                endpoint: self._inspectorUrl || 'unknown',
+                duration: Date.now() - (self._inspectorStartTime || Date.now()),
+                noLoadingIndicator: true,
+              }
+            });
+          }
+        }
+      }, 10000);
+
+      self.addEventListener('loadend', function() { clearTimeout(timer); });
+      return origSend.apply(this, arguments);
+    };
+    return true;
+  })(),
 
   // ── Window controls ──
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
