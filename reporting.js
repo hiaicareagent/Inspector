@@ -43,7 +43,9 @@ class ReportAggregator {
     expiredTokenRequests, tokenExpiryWarnings, concurrentSessionAnomalies,
     privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents,
     clinicalSLABreaches, nonClinicalSLABreaches, highErrorRateEndpoints,
-    clinicalAPIErrors, silentFailures, thirdPartyDependencies
+    clinicalAPIErrors, silentFailures, thirdPartyDependencies,
+    staleDataFlags, valueNotRendered, valueTruncated,
+    allergyAlertNotVisible, formPrepopulationMismatches
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -99,6 +101,13 @@ class ReportAggregator {
     this.clinicalAPIErrors = clinicalAPIErrors || [];
     this.silentFailures = silentFailures || [];
     this.thirdPartyDependencies = thirdPartyDependencies || new Map();
+
+    // Pillar 8 — Data Integrity
+    this.staleDataFlags = staleDataFlags || [];
+    this.valueNotRendered = valueNotRendered || [];
+    this.valueTruncated = valueTruncated || [];
+    this.allergyAlertNotVisible = allergyAlertNotVisible || [];
+    this.formPrepopulationMismatches = formPrepopulationMismatches || [];
   }
 
   /** ─── Compute Scores ─── */
@@ -119,6 +128,10 @@ class ReportAggregator {
     // Pillar 7 deductions
     s -= (this.silentFailures || []).length * 25;
     s -= (this.highErrorRateEndpoints || []).length * 20;
+    // Pillar 8 deductions
+    s -= (this.allergyAlertNotVisible || []).length * 40;
+    s -= (this.valueTruncated || []).length * 30;
+    s -= (this.formPrepopulationMismatches || []).length * 35;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -149,6 +162,8 @@ class ReportAggregator {
     // Pillar 7 deductions
     s -= (this.clinicalSLABreaches || []).length * 15;
     s -= (this.nonClinicalSLABreaches || []).length * 5;
+    // Pillar 8 deductions
+    s -= (this.staleDataFlags || []).length * 10;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -613,6 +628,61 @@ class ReportAggregator {
           }
           return Object.entries(endpoints).map(([name, data]) => ({ endpoint: name, ...data }));
         })(),
+      },
+
+      // ════════════════════════════════════════
+      // Data Integrity Section (Pillar 8)
+      // ════════════════════════════════════════
+      dataIntegrity: {
+        staleDataFlags: {
+          total: this.staleDataFlags.length,
+          flags: this.staleDataFlags.slice(-50).map(f => ({
+            endpoint: f.endpoint,
+            lastFetchedAt: f.lastFetchedAt,
+            staleSince: f.staleSince,
+            threshold: f.threshold,
+            ageMinutes: f.ageMinutes,
+            timestamp: f.timestamp,
+          })),
+        },
+        valueNotRendered: {
+          total: this.valueNotRendered.length,
+          entries: this.valueNotRendered.slice(-50).map(e => ({
+            resourceType: e.resourceType,
+            field: e.field,
+            apiValue: e.apiValue,
+            url: e.url,
+            timestamp: e.timestamp,
+          })),
+        },
+        valueTruncated: {
+          total: this.valueTruncated.length,
+          entries: this.valueTruncated.slice(-50).map(e => ({
+            resourceType: e.resourceType,
+            field: e.field,
+            apiValue: e.apiValue,
+            url: e.url,
+            timestamp: e.timestamp,
+          })),
+        },
+        allergyAlertNotVisible: {
+          total: this.allergyAlertNotVisible.length,
+          entries: this.allergyAlertNotVisible.slice(-50).map(a => ({
+            element: a.element,
+            boundingRect: a.boundingRect,
+            viewportHeight: a.viewportHeight,
+            timestamp: a.timestamp,
+          })),
+        },
+        formPrepopulationMismatches: {
+          total: this.formPrepopulationMismatches.length,
+          entries: this.formPrepopulationMismatches.slice(-50).map(f => ({
+            field: f.field,
+            expectedValue: f.expectedValue,
+            renderedValue: f.renderedValue,
+            timestamp: f.timestamp,
+          })),
+        },
       },
 
       // ════════════════════════════════════════

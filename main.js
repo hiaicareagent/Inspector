@@ -128,6 +128,22 @@ const consoleWarnings = [];
 const rendererCrashes = [];
 let sessionStartTime = new Date().toISOString();
 
+// ── Data Integrity stores (Pillar 8) ──
+const apiResponseCache = new Map(); // normalizedEndpoint -> [{ body, resourceType, url, lastFetchedAt }]
+const staleDataFlags = [];
+const valueNotRendered = [];
+const valueTruncated = [];
+const allergyAlertNotVisible = [];
+const formPrepopulationMismatches = [];
+
+const STALE_THRESHOLDS = {
+  '/vitals': 5 * 60 * 1000,
+  '/medications': 10 * 60 * 1000,
+  '/alerts': 2 * 60 * 1000,
+};
+
+let staleDataTimer = null;
+
 // ── UX-specific stores (Pillar 3) ──
 const rageClicks = [];
 const deadClicks = [];
@@ -697,11 +713,23 @@ function setupNetworkInterception() {
                 if (resourceType && currentJwtRole) {
                   _checkPrivilegeScope(currentJwtRole, resourceType, response.url);
                 }
-              } catch (_) {}
-            } catch (bodyErr) {
-              if (!bodyErr.message.includes('No resource')) {
-                console.warn('[Inspector:Network] Could not get response body:', bodyErr.message);
+                // ── API Response Cache (Pillar 8) ──
+                if (resourceType && ['Patient','Observation','MedicationRequest','AllergyIntolerance'].includes(resourceType)) {
+                  const endpoint = normalizeEndpoint(response.url);
+                  if (!apiResponseCache.has(endpoint)) {
+                    apiResponseCache.set(endpoint, []);
+                  }
+                  const cache = apiResponseCache.get(endpoint);
+                  cache.push({ body: bodyText, resourceType, url: response.url, lastFetchedAt: Date.now() });
+                  if (cache.length > 20) cache.shift();
+                }
+              } catch (bodyErr) {
+                if (!bodyErr.message.includes('No resource')) {
+                  console.warn('[Inspector:Network] Could not get response body:', bodyErr.message);
+                }
               }
+            } catch (e) {
+              // Outer try: network-level errors handled silently
             }
           }, 100);
         }
@@ -742,6 +770,16 @@ function setupNetworkInterception() {
                     // ── Privilege Scope Check (Pillar 6) [fallback pattern] ──
                     if (parsed.resourceType && currentJwtRole) {
                       _checkPrivilegeScope(currentJwtRole, parsed.resourceType, response.url);
+                    }
+                    // ── API Response Cache (Pillar 8) ──
+                    if (parsed.resourceType && ['Patient','Observation','MedicationRequest','AllergyIntolerance'].includes(parsed.resourceType)) {
+                      const endpoint = normalizeEndpoint(response.url);
+                      if (!apiResponseCache.has(endpoint)) {
+                        apiResponseCache.set(endpoint, []);
+                      }
+                      const cache = apiResponseCache.get(endpoint);
+                      cache.push({ body: bodyText, resourceType: parsed.resourceType, url: response.url, lastFetchedAt: Date.now() });
+                      if (cache.length > 20) cache.shift();
                     }
                   }
                 } catch (_) { /* not JSON */ }
@@ -971,6 +1009,290 @@ function getEndpointSummary() {
     }
   }
   return summary.sort((a, b) => b.avgResponseTime - a.avgResponseTime);
+}
+
+// ──────────────────────────────────────────────
+// Stale Data Detection (Pillar 8)
+// ──────────────────────────────────────────────
+
+function startStaleDataDetection() {
+  if (staleDataTimer) return;
+  checkStaleData();
+  staleDataTimer = setInterval(checkStaleData, 60000);
+  console.log("[Inspector:Data] Stale data detection enabled (interval: 60s).");
+}
+
+function stopStaleDataDetection() {
+  if (staleDataTimer) { clearInterval(staleDataTimer); staleDataTimer = null; }
+}
+
+function checkStaleData() {
+  const now = Date.now();
+  for (const [endpoint, entries] of apiResponseCache) {
+    if (entries.length === 0) continue;
+    const latest = entries[entries.length - 1];
+    const ageMs = now - latest.lastFetchedAt;
+
+    // Find matching threshold
+    for (const [pathPrefix, thresholdMs] of Object.entries(STALE_THRESHOLDS)) {
+      if (endpoint.includes(pathPrefix) && ageMs > thresholdMs) {
+        const alreadyFlagged = staleDataFlags.find(f => f.endpoint === endpoint && Math.abs(new Date(f.timestamp) - now) < thresholdMs);
+        if (!alreadyFlagged) {
+          const entry = {
+            endpoint,
+            lastFetchedAt: new Date(latest.lastFetchedAt).toISOString(),
+            staleSince: new Date().toISOString(),
+            threshold: thresholdMs,
+            ageMinutes: Math.round(ageMs / 60000),
+            timestamp: new Date().toISOString(),
+          };
+          staleDataFlags.push(entry);
+          console.warn(`[Inspector:Data] ⚠ STALE_DATA: ${endpoint} not refreshed in ${Math.round(ageMs/60000)}min (threshold ${thresholdMs/60000}min)`);
+        }
+        break; // Only match the first threshold
+      }
+    }
+  }
+}
+
+// ──────────────────────────────────────────────
+// Inject Data Integrity Scanners (Pillar 8)
+// ──────────────────────────────────────────────
+
+function injectDataIntegrityScanners() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorDataIntegrityInjected) return;
+      window.__inspectorDataIntegrityInjected = true;
+
+      var lastPatientIdUrl = '';
+
+      // ════════════════════════════════════════
+      // 3. Critical Value Rendering Verification
+      // ════════════════════════════════════════
+
+      function verifyCriticalValuesRendered() {
+        window.inspector.getAPICache().then(function(cache) {
+          if (!cache || cache.length === 0) return;
+          for (var ci = 0; ci < cache.length; ci++) {
+            var entry = cache[ci];
+            if (!entry || !entry.resourceType) continue;
+
+            if (entry.resourceType === 'Observation') {
+              try {
+                var parsed = JSON.parse(entry.body);
+                if (!parsed) continue;
+                checkObservationValues(parsed, entry.url);
+              } catch(e) {}
+            }
+          }
+        }).catch(function() {});
+      }
+
+      function checkObservationValues(obs, url) {
+        var body = document.body;
+        if (!body) return;
+        var domText = (body.innerText || body.textContent || '');
+
+        // Check valueQuantity
+        if (obs.valueQuantity && obs.valueQuantity.value !== undefined) {
+          var apiVal = String(obs.valueQuantity.value);
+          var rendered = domText.includes(apiVal);
+          if (!rendered) {
+            // Try nearby (within ±0.1)
+            var numVal = parseFloat(apiVal);
+            if (!isNaN(numVal)) {
+              for (var delta = -0.1; delta <= 0.1; delta += 0.01) {
+                var approx = (numVal + delta).toFixed(1);
+                if (domText.includes(approx)) { rendered = true; break; }
+              }
+            }
+          }
+
+          if (!rendered) {
+            window.inspector.reportDataIntegrity('VALUE_NOT_RENDERED', {
+              resourceType: 'Observation',
+              field: 'valueQuantity.value',
+              apiValue: apiVal,
+              url: url,
+            });
+          } else if (apiVal.indexOf('.') === apiVal.length - 1) {
+            // Value ends with "." — truncated
+            window.inspector.reportDataIntegrity('VALUE_TRUNCATED', {
+              resourceType: 'Observation',
+              field: 'valueQuantity.value',
+              apiValue: apiVal,
+              url: url,
+            });
+          }
+        }
+
+        // Check components with numeric values
+        if (obs.component && obs.component.length) {
+          for (var cpi = 0; cpi < obs.component.length; cpi++) {
+            var comp = obs.component[cpi];
+            if (comp.valueQuantity && comp.valueQuantity.value !== undefined) {
+              var cVal = String(comp.valueQuantity.value);
+              if (!domText.includes(cVal)) {
+                window.inspector.reportDataIntegrity('VALUE_NOT_RENDERED', {
+                  resourceType: 'Observation',
+                  field: 'component[' + cpi + '].valueQuantity.value',
+                  apiValue: cVal,
+                  url: url,
+                });
+              } else if (cVal.indexOf('.') === cVal.length - 1) {
+                window.inspector.reportDataIntegrity('VALUE_TRUNCATED', {
+                  resourceType: 'Observation',
+                  field: 'component[' + cpi + '].valueQuantity.value',
+                  apiValue: cVal,
+                  url: url,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // ════════════════════════════════════════
+      // 4. Allergy/Alert Visibility Audit
+      // ════════════════════════════════════════
+
+      function checkAllergyAlertVisibility() {
+        var url = window.location.href.toLowerCase();
+        // Check if on a prescription-related page
+        if (!/prescription|order|medication|drug|pharmacy|administer/i.test(url)) return;
+
+        var allergyElements = document.querySelectorAll(
+          '[class*="allergy"], [class*="alert"], [class*="warning"], [aria-label*="allergy" i], [aria-label*="alert" i]'
+        );
+
+        for (var ai = 0; ai < allergyElements.length; ai++) {
+          var el = allergyElements[ai];
+          var rect = el.getBoundingClientRect();
+          if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
+            // Element IS visible — no flag
+          } else {
+            // Element exists but is out of viewport
+            window.inspector.reportDataIntegrity('ALLERGY_ALERT_NOT_VISIBLE', {
+              element: el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + (typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '') : ''),
+              boundingRect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width), height: Math.round(rect.height) },
+              viewportHeight: window.innerHeight,
+            });
+          }
+        }
+      }
+
+      // ════════════════════════════════════════
+      // 5. Form Pre-population Accuracy
+      // ════════════════════════════════════════
+
+      function checkFormPrepopulation() {
+        var url = window.location.href;
+        var match = url.match(/[?&]patient[=_]?([^&]+)/i) || url.match(/\/patient\/([^\/?#]+)/i);
+        var patientId = match ? match[1] : '';
+        if (!patientId || patientId === lastPatientIdUrl) return;
+        lastPatientIdUrl = patientId;
+
+        window.inspector.getAPICache().then(function(cache) {
+          if (!cache || cache.length === 0) return;
+
+          // Find Patient resource from cache
+          var patientData = null;
+          for (var ci = 0; ci < cache.length; ci++) {
+            var entry = cache[ci];
+            if (entry.resourceType === 'Patient') {
+              try {
+                patientData = JSON.parse(entry.body);
+                if (patientData) break;
+              } catch(e) {}
+            }
+          }
+          if (!patientData) return;
+
+          // Extract expected values
+          var expectedName = '';
+          if (patientData.name && patientData.name[0]) {
+            var nameObj = patientData.name[0];
+            expectedName = ((nameObj.given || []).join(' ') + ' ' + (nameObj.family || '')).trim();
+          }
+          var expectedMRN = '';
+          if (patientData.identifier) {
+            for (var idi = 0; idi < patientData.identifier.length; idi++) {
+              var idObj = patientData.identifier[idi];
+              if (idObj.type && idObj.type.coding && idObj.type.coding.some(function(c) { return c.code === 'MR' || c.code === 'SS' || c.display === 'Medical Record Number' || c.display === 'MRN'; })) {
+                expectedMRN = idObj.value || '';
+                break;
+              }
+              // Fallback: first identifier
+              if (!expectedMRN) expectedMRN = idObj.value || '';
+            }
+          }
+
+          var expectedDOB = patientData.birthDate || '';
+
+          // Scan DOM for form fields
+          var body = document.body;
+          if (!body) return;
+          var text = body.innerText || body.textContent || '';
+
+          // Check name
+          if (expectedName && !text.includes(expectedName)) {
+            window.inspector.reportDataIntegrity('FORM_PREPOPULATION_MISMATCH', {
+              field: 'name',
+              expectedValue: expectedName,
+              renderedValue: '(not found in DOM)',
+            });
+          }
+
+          // Check MRN
+          if (expectedMRN && !text.includes(expectedMRN)) {
+            window.inspector.reportDataIntegrity('FORM_PREPOPULATION_MISMATCH', {
+              field: 'MRN',
+              expectedValue: expectedMRN,
+              renderedValue: '(not found in DOM)',
+            });
+          }
+
+          // Check DOB
+          if (expectedDOB && !text.includes(expectedDOB)) {
+            window.inspector.reportDataIntegrity('FORM_PREPOPULATION_MISMATCH', {
+              field: 'birthDate',
+              expectedValue: expectedDOB,
+              renderedValue: '(not found in DOM)',
+            });
+          }
+        }).catch(function() {});
+      }
+
+      // ════════════════════════════════════════
+      // Run checks on page load
+      // ════════════════════════════════════════
+
+      setTimeout(function() {
+        verifyCriticalValuesRendered();
+        checkAllergyAlertVisibility();
+        checkFormPrepopulation();
+      }, 3000);
+
+      // Re-check on URL changes
+      window.addEventListener('popstate', function() {
+        setTimeout(function() {
+          verifyCriticalValuesRendered();
+          checkAllergyAlertVisibility();
+          checkFormPrepopulation();
+        }, 2000);
+      });
+
+      var dataPushState = history.pushState;
+      history.pushState = function() { dataPushState.apply(this, arguments); window.__inspectorDataIntegrityInjected = false; };
+      var dataReplaceState = history.replaceState;
+      history.replaceState = function() { dataReplaceState.apply(this, arguments); window.__inspectorDataIntegrityInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector] Could not inject data integrity scanners:', err.message);
+  });
 }
 
 // ──────────────────────────────────────────────
@@ -2212,6 +2534,48 @@ function setupIPC() {
     };
   });
 
+  // ── Data Integrity IPC (Pillar 8) ──
+
+  ipcMain.on('inspector:reportDataIntegrity', (_event, { flag, data }) => {
+    const entry = { ...data, timestamp: new Date().toISOString() };
+    if (flag === 'VALUE_NOT_RENDERED') {
+      valueNotRendered.push(entry);
+      console.warn(`[Inspector:Data] ⚠ VALUE_NOT_RENDERED: ${data.resourceType} ${data.field} = ${data.apiValue}`);
+    }
+    if (flag === 'VALUE_TRUNCATED') {
+      valueTruncated.push(entry);
+      console.warn(`[Inspector:Data] ⚠ VALUE_TRUNCATED: ${data.resourceType} ${data.field} = ${data.apiValue}`);
+    }
+    if (flag === 'ALLERGY_ALERT_NOT_VISIBLE') {
+      allergyAlertNotVisible.push(entry);
+      console.warn(`[Inspector:Data] ⚠ ALLERGY_ALERT_NOT_VISIBLE: ${data.element} is outside viewport`);
+    }
+    if (flag === 'FORM_PREPOPULATION_MISMATCH') {
+      formPrepopulationMismatches.push(entry);
+      console.warn(`[Inspector:Data] ⚠ FORM_PREPOPULATION_MISMATCH: ${data.field} expected "${data.expectedValue}" got "${data.renderedValue}"`);
+    }
+  });
+
+  ipcMain.handle('inspector:getAPICache', async () => {
+    const cache = [];
+    for (const [, entries] of apiResponseCache) {
+      for (const e of entries) {
+        cache.push({ resourceType: e.resourceType, body: e.body, url: e.url, lastFetchedAt: e.lastFetchedAt });
+      }
+    }
+    return cache;
+  });
+
+  ipcMain.handle('inspector:getDataIntegrityCounts', async () => {
+    return {
+      staleDataFlags: staleDataFlags.length,
+      valueNotRendered: valueNotRendered.length,
+      valueTruncated: valueTruncated.length,
+      allergyAlertNotVisible: allergyAlertNotVisible.length,
+      formPrepopulationMismatches: formPrepopulationMismatches.length,
+    };
+  });
+
   ipcMain.handle('inspector:getSummaryScores', async () => {
     const complianceScore = _computeComplianceScore();
     const uxScore = _computeUXScore();
@@ -2246,6 +2610,10 @@ function _computeComplianceScore() {
   // Pillar 7 deductions
   score -= silentFailures.length * 25;
   score -= highErrorRateEndpoints.length * 20;
+  // Pillar 8 deductions
+  score -= allergyAlertNotVisible.length * 40;
+  score -= valueTruncated.length * 30;
+  score -= formPrepopulationMismatches.length * 35;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2281,6 +2649,8 @@ function _computePerformanceScore() {
   // Pillar 7 deductions
   score -= clinicalSLABreaches.length * 15;
   score -= nonClinicalSLABreaches.length * 5;
+  // Pillar 8 deductions
+  score -= staleDataFlags.length * 10;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2299,6 +2669,7 @@ app.whenReady().then(() => {
   startTrace();
   setupNetworkInterception();
   setupAPIHealthMonitoring();
+  startStaleDataDetection();
   startAutoLogoffAudit();
 
   mainWindow.webContents.on('did-finish-load', () => {
@@ -2317,6 +2688,8 @@ app.whenReady().then(() => {
     injectWorkflowIntelligence();
     // Pillar 6
     injectLoginLogoutDetector();
+    // Pillar 8
+    injectDataIntegrityScanners();
   });
 
   app.on('activate', () => {
@@ -2326,6 +2699,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopMemoryMonitoring();
+  stopStaleDataDetection();
   stopAutoLogoffAudit();
   if (process.platform !== 'darwin') app.quit();
 });

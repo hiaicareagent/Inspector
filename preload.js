@@ -54,6 +54,17 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getSessionCounts');
   },
 
+  // ── Data Integrity (Pillar 8) ──
+  reportDataIntegrity: (flag, data) => {
+    ipcRenderer.send('inspector:reportDataIntegrity', { flag, data });
+  },
+  getAPICache: () => {
+    return ipcRenderer.invoke('inspector:getAPICache');
+  },
+  getDataIntegrityCounts: () => {
+    return ipcRenderer.invoke('inspector:getDataIntegrityCounts');
+  },
+
   // ── API Health (Pillar 7) ──
   getApiHealthCounts: () => {
     return ipcRenderer.invoke('inspector:getApiHealthCounts');
