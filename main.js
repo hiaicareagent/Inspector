@@ -68,6 +68,13 @@ const autoLogoffViolations = [];
 let lastInteractionTimestamp = null;
 let longestInactivity = 0;
 
+// ── Workflow Intelligence stores (Pillar 5) ──
+const completedWorkflows = [];
+const abandonedWorkflows = [];
+const slowWorkflows = [];
+const navigationConfusion = [];
+const concurrentPatientSessions = [];
+
 // ── Telemetry-specific stores (Pillar 4) ──
 const consoleErrors = [];
 const consoleWarnings = [];
@@ -1038,6 +1045,297 @@ function injectUXScanners() {
 }
 
 // ──────────────────────────────────────────────
+// Inject Workflow Intelligence (Pillar 5)
+// ──────────────────────────────────────────────
+
+function injectWorkflowIntelligence() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorWorkflowInjected) return;
+      window.__inspectorWorkflowInjected = true;
+
+      // ════════════════════════════════════════
+      // Workflow Patterns & State
+      // ════════════════════════════════════════
+
+      var WORKFLOW_PATTERNS = {
+        medication_order: { steps: ['/medications', '/order', '/sign', '/submit'], maxTime: 180 },
+        discharge_summary: { steps: ['/patient', '/summary', '/sign'], maxTime: 600 },
+        lab_order: { steps: ['/labs', '/order', '/submit'], maxTime: 120 },
+      };
+
+      var navHistory = [];
+      var currentWorkflows = {};
+      var last10Nav = [];
+      var workflowCompletedThisSession = [];
+
+      // ════════════════════════════════════════
+      // URL Helpers
+      // ════════════════════════════════════════
+
+      function getPatientContext() {
+        var url = window.location.href;
+        var title = document.title;
+        // Try to extract patient ID from URL
+        var match = url.match(/[?&]patient[=_]?([^&]+)/i) || url.match(/\/patient\/([^\/?#]+)/i);
+        var patientId = match ? match[1] : '';
+        if (!patientId) {
+          match = title.match(/[Pp]atient\s*[#:]?\s*(\w+)/);
+          patientId = match ? match[1] : '';
+        }
+        return patientId || '';
+      }
+
+      function getUrlPath(url) {
+        try { return new URL(url).pathname.toLowerCase(); }
+        catch(e) { return ''; }
+      }
+
+      // ════════════════════════════════════════
+      // 1. Workflow Session Tracker
+      // ════════════════════════════════════════
+
+      function matchWorkflow(path) {
+        var matched = [];
+        for (var wf in WORKFLOW_PATTERNS) {
+          var steps = WORKFLOW_PATTERNS[wf].steps;
+          for (var si = 0; si < steps.length; si++) {
+            if (path.includes(steps[si])) {
+              matched.push({ workflow: wf, stepIndex: si, step: steps[si] });
+              break;
+            }
+          }
+        }
+        if (matched.length === 0) return null;
+        // Return the one with the most advanced step index
+        matched.sort(function(a, b) { return b.stepIndex - a.stepIndex; });
+        return matched[0];
+      }
+
+      function onNavigation(url) {
+        var path = getUrlPath(url);
+        if (!path) return;
+
+        var now = Date.now();
+        var patientId = getPatientContext();
+
+        // Record navigation
+        var navEntry = { url: url, path: path, timestamp: now, patientContext: patientId };
+        navHistory.push(navEntry);
+        last10Nav.push(path);
+        if (last10Nav.length > 10) last10Nav.shift();
+
+        // Match against workflow patterns
+        var match = matchWorkflow(path);
+        if (!match) {
+          // User navigated away from a workflow — check for abandonment
+          for (var wf in currentWorkflows) {
+            var activeWf = currentWorkflows[wf];
+            if (activeWf && !activeWf.completed) {
+              var checkTime = now;
+              var checkPath = path;
+              var isCompletionStep = false;
+              var steps = WORKFLOW_PATTERNS[wf].steps;
+              var lastStep = steps[steps.length - 1];
+              if (checkPath.includes(lastStep)) {
+                isCompletionStep = true;
+              }
+              if (!isCompletionStep) {
+                // Abandoned
+                var duration = Math.round((checkTime - activeWf.startTime) / 1000);
+                window.inspector.reportWorkflowEvent('workflow_abandoned', {
+                  workflowType: wf,
+                  lastCompletedStep: activeWf.currentStep || 'none',
+                  abandonedAt: checkPath,
+                  duration: duration,
+                  patientContext: patientId,
+                });
+                window.inspector.reportWorkflowEvent('workflow_slow', {
+                  workflowType: wf,
+                  duration: duration,
+                  threshold: WORKFLOW_PATTERNS[wf].maxTime,
+                  patientContext: patientId,
+                });
+                delete currentWorkflows[wf];
+              }
+            }
+          }
+          return;
+        }
+
+        var wfType = match.workflow;
+        if (!currentWorkflows[wfType]) {
+          // Start new workflow
+          currentWorkflows[wfType] = {
+            workflowType: wfType,
+            startTime: now,
+            currentStep: match.step,
+            stepIndex: match.stepIndex,
+            stepsVisited: [match.step],
+            completed: false,
+            patientContext: patientId,
+          };
+        } else {
+          var wf = currentWorkflows[wfType];
+          // Update progress
+          if (match.stepIndex > wf.stepIndex) {
+            wf.currentStep = match.step;
+            wf.stepIndex = match.stepIndex;
+            wf.stepsVisited.push(match.step);
+          }
+          // Check if workflow is completed (reached final step)
+          var stepCount = WORKFLOW_PATTERNS[wfType].steps.length;
+          if (match.stepIndex >= stepCount - 1) {
+            wf.completed = true;
+            var duration = Math.round((now - wf.startTime) / 1000);
+            var maxTime = WORKFLOW_PATTERNS[wfType].maxTime;
+            window.inspector.reportWorkflowEvent('workflow_completed', {
+              workflowType: wfType,
+              duration: duration,
+              stepsVisited: wf.stepsVisited.length,
+              patientContext: patientId,
+            });
+            if (duration > maxTime) {
+              window.inspector.reportWorkflowEvent('workflow_slow', {
+                workflowType: wfType,
+                duration: duration,
+                threshold: maxTime,
+                patientContext: patientId,
+              });
+            }
+            delete currentWorkflows[wfType];
+          }
+        }
+      }
+
+      // ════════════════════════════════════════
+      // 3. Non-linear Navigation Detection
+      // ════════════════════════════════════════
+
+      function detectNavigationConfusion(wfType, path) {
+        if (!wfType || !path) return;
+        var count = 0;
+        for (var i = 0; i < last10Nav.length - 1; i++) {
+          for (var j = i + 1; j < last10Nav.length; j++) {
+            if (last10Nav[i] === last10Nav[j]) count++;
+          }
+        }
+        if (count >= 3) {
+          window.inspector.reportWorkflowEvent('navigation_confusion', {
+            workflowType: wfType || 'unknown',
+            backtrackCount: count,
+            sequence: last10Nav.slice(),
+          });
+        }
+      }
+
+      // ════════════════════════════════════════
+      // 2. Time-on-task + 3. Detection hooks
+      // ════════════════════════════════════════
+
+      // Wrap history.pushState
+      var origPushState = history.pushState;
+      history.pushState = function() {
+        origPushState.apply(this, arguments);
+        onNavigation(window.location.href);
+        var match = matchWorkflow(getUrlPath(window.location.href));
+        detectNavigationConfusion(match ? match.workflow : null, getUrlPath(window.location.href));
+      };
+
+      var origReplaceState = history.replaceState;
+      history.replaceState = function() {
+        origReplaceState.apply(this, arguments);
+        onNavigation(window.location.href);
+        var match = matchWorkflow(getUrlPath(window.location.href));
+        detectNavigationConfusion(match ? match.workflow : null, getUrlPath(window.location.href));
+      };
+
+      window.addEventListener('popstate', function() {
+        onNavigation(window.location.href);
+        var match = matchWorkflow(getUrlPath(window.location.href));
+        detectNavigationConfusion(match ? match.workflow : null, getUrlPath(window.location.href));
+      });
+
+      window.addEventListener('hashchange', function() {
+        onNavigation(window.location.href);
+        var match = matchWorkflow(getUrlPath(window.location.href));
+        detectNavigationConfusion(match ? match.workflow : null, getUrlPath(window.location.href));
+      });
+
+      // Initial navigation recording
+      onNavigation(window.location.href);
+
+      // ════════════════════════════════════════
+      // 4. Multi-tab Patient Detection
+      // ════════════════════════════════════════
+
+      try {
+        var patientId = getPatientContext();
+        if (patientId) {
+          // Write patient ID to sessionStorage for cross-tab detection
+          var existingPatients = {};
+          try {
+            var stored = sessionStorage.getItem('__inspector_patients') || '{}';
+            existingPatients = JSON.parse(stored);
+          } catch(e) { existingPatients = {}; }
+
+          existingPatients[patientId] = (existingPatients[patientId] || 0) + 1;
+          sessionStorage.setItem('__inspector_patients', JSON.stringify(existingPatients));
+
+          // Use BroadcastChannel for real-time cross-tab communication
+          var channel = new BroadcastChannel('inspector_patient_channel');
+          channel.postMessage({ type: 'patient_open', patientId: patientId, tabId: Date.now() });
+
+          channel.onmessage = function(e) {
+            if (e.data && e.data.type === 'patient_open' && e.data.patientId === patientId) {
+              // Count how many tabs have this patient open
+              var tabCount = 0;
+              try {
+                var stored = sessionStorage.getItem('__inspector_patients') || '{}';
+                var patients = JSON.parse(stored);
+                tabCount = patients[patientId] || 0;
+              } catch(e) { tabCount = 1; }
+
+              if (tabCount > 1) {
+                window.inspector.reportWorkflowEvent('concurrent_patient', {
+                  patientID: patientId,
+                  tabCount: tabCount,
+                });
+              }
+            }
+          };
+
+          // Clean up on page unload
+          window.addEventListener('beforeunload', function() {
+            try {
+              var stored = sessionStorage.getItem('__inspector_patients') || '{}';
+              var patients = JSON.parse(stored);
+              if (patients[patientId]) {
+                patients[patientId]--;
+                if (patients[patientId] <= 0) delete patients[patientId];
+              }
+              sessionStorage.setItem('__inspector_patients', JSON.stringify(patients));
+            } catch(e) {}
+          });
+        }
+      } catch(e) {
+        console.warn('[Inspector] BroadcastChannel not available:', e.message);
+      }
+
+      // Reset flag on SPA navigation
+      var wfPushState = history.pushState;
+      history.pushState = function() { wfPushState.apply(this, arguments); window.__inspectorWorkflowInjected = false; };
+      var wfReplaceState = history.replaceState;
+      history.replaceState = function() { wfReplaceState.apply(this, arguments); window.__inspectorWorkflowInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector] Could not inject workflow intelligence:', err.message);
+  });
+}
+
+// ──────────────────────────────────────────────
 // Inject axe-core Accessibility Scanner (Pillar 3)
 // ──────────────────────────────────────────────
 
@@ -1171,6 +1469,61 @@ function setupIPC() {
 
   // ── Axe-core Results (Pillar 3) ──
 
+  // ── Workflow Intelligence (Pillar 5) ──
+
+  ipcMain.on('inspector:reportWorkflow', (_event, { type, data }) => {
+    const entry = { ...data, timestamp: new Date().toISOString() };
+
+    if (type === 'workflow_completed') {
+      completedWorkflows.push(entry);
+      console.log(`[Inspector:Workflow] ✓ ${data.workflowType} completed in ${data.duration}s`);
+    }
+    if (type === 'workflow_abandoned') {
+      abandonedWorkflows.push(entry);
+      uxLog.push({
+        category: 'workflow_abandonment',
+        score: 0,
+        element: null,
+        note: `WORKFLOW_ABANDONMENT: ${data.workflowType} abandoned at step ${data.lastCompletedStep}`,
+        timestamp: entry.timestamp,
+      });
+      console.warn(`[Inspector:Workflow] ⚠ WORKFLOW_ABANDONMENT: ${data.workflowType} abandoned at ${data.lastCompletedStep}`);
+    }
+    if (type === 'workflow_slow') {
+      slowWorkflows.push(entry);
+      uxLog.push({
+        category: 'slow_workflow',
+        score: Math.round(data.duration / 60),
+        element: null,
+        note: `SLOW_WORKFLOW: ${data.workflowType} took ${data.duration}s (threshold ${data.threshold}s)`,
+        timestamp: entry.timestamp,
+      });
+      console.warn(`[Inspector:Workflow] ⚠ SLOW_WORKFLOW: ${data.workflowType} took ${data.duration}s (max ${data.threshold}s)`);
+    }
+    if (type === 'navigation_confusion') {
+      navigationConfusion.push(entry);
+      uxLog.push({
+        category: 'navigation_confusion',
+        score: data.backtrackCount,
+        element: null,
+        note: `NAVIGATION_CONFUSION: ${data.workflowType} backtracks=${data.backtrackCount}`,
+        timestamp: entry.timestamp,
+      });
+      console.warn(`[Inspector:Workflow] ⚠ NAVIGATION_CONFUSION: ${data.workflowType} backtracks=${data.backtrackCount}`);
+    }
+    if (type === 'concurrent_patient') {
+      concurrentPatientSessions.push(entry);
+      complianceLog.push({
+        standard: 'HIPAA',
+        check: 'CONCURRENT_PATIENT_SESSION',
+        passed: false,
+        details: JSON.stringify(entry),
+        timestamp: entry.timestamp,
+      });
+      console.warn(`[Inspector:Workflow] ⚠ CONCURRENT_PATIENT_SESSION: Patient ${data.patientID} open in ${data.tabCount} tabs`);
+    }
+  });
+
   ipcMain.on('inspector:reportAxeResults', (_event, results) => {
     if (results) {
       accessibilityAudit.score = results.score;
@@ -1216,7 +1569,10 @@ function setupIPC() {
         rageClicks, deadClicks, layoutShifts, accessibilityAudit,
         // Pillar 4
         consoleErrors, consoleWarnings, rendererCrashes,
-        sessionStartTime, process.versions.electron, TARGET_URL
+        sessionStartTime, process.versions.electron, TARGET_URL,
+        // Pillar 5
+        completedWorkflows, abandonedWorkflows, slowWorkflows,
+        navigationConfusion, concurrentPatientSessions
       );
       const filePath = aggregator.generateReport();
       return { success: true, filePath };
@@ -1254,6 +1610,16 @@ function setupIPC() {
     };
   });
 
+  ipcMain.handle('inspector:getWorkflowCounts', async () => {
+    return {
+      completedWorkflows: completedWorkflows.length,
+      abandonedWorkflows: abandonedWorkflows.length,
+      slowWorkflows: slowWorkflows.length,
+      navigationConfusion: navigationConfusion.length,
+      concurrentPatientSessions: concurrentPatientSessions.length,
+    };
+  });
+
   ipcMain.handle('inspector:getSummaryScores', async () => {
     const complianceScore = _computeComplianceScore();
     const uxScore = _computeUXScore();
@@ -1279,6 +1645,7 @@ function _computeComplianceScore() {
   score -= jciIpsg1Violations.length * 25;
   score -= phiUnencryptedTransmissions.length * 30;
   score -= autoLogoffViolations.length * 20;
+  score -= concurrentPatientSessions.length * 20;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -1289,6 +1656,8 @@ function _computeUXScore() {
   score -= layoutShifts.filter(s => s.isSignificant).length * 15;
   score -= (accessibilityAudit.criticalViolations || []).length * 10;
   score -= (accessibilityAudit.seriousViolations || []).length * 5;
+  score -= abandonedWorkflows.length * 15;
+  score -= navigationConfusion.length * 10;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -1340,6 +1709,8 @@ app.whenReady().then(() => {
     // Pillar 3
     injectUXScanners();
     injectAxeScanner();
+    // Pillar 5
+    injectWorkflowIntelligence();
   });
 
   app.on('activate', () => {

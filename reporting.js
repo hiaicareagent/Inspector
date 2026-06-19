@@ -37,7 +37,9 @@ class ReportAggregator {
     jciViolations, autoLogoffViolations, longestInactivity, autoLogoffTimeoutMs,
     rageClicks, deadClicks, layoutShifts, accessibilityAudit,
     consoleErrors, consoleWarnings, rendererCrashes,
-    sessionStartTime, electronVersion, targetUrl
+    sessionStartTime, electronVersion, targetUrl,
+    completedWorkflows, abandonedWorkflows, slowWorkflows,
+    navigationConfusion, concurrentPatientSessions
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -69,6 +71,13 @@ class ReportAggregator {
     this.sessionStartTime = sessionStartTime || new Date().toISOString();
     this.electronVersion = electronVersion || process.versions.electron;
     this.targetUrl = targetUrl || '';
+
+    // Pillar 5 — Workflow Intelligence
+    this.completedWorkflows = completedWorkflows || [];
+    this.abandonedWorkflows = abandonedWorkflows || [];
+    this.slowWorkflows = slowWorkflows || [];
+    this.navigationConfusion = navigationConfusion || [];
+    this.concurrentPatientSessions = concurrentPatientSessions || [];
   }
 
   /** ─── Compute Scores ─── */
@@ -80,6 +89,7 @@ class ReportAggregator {
     s -= this.jciViolations.length * 25;
     s -= this.phiUnencryptedTransmissions.length * 30;
     s -= this.autoLogoffViolations.length * 20;
+    s -= (this.concurrentPatientSessions || []).length * 20;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -90,6 +100,8 @@ class ReportAggregator {
     s -= this.layoutShifts.filter(x => x.isSignificant).length * 15;
     s -= (this.accessibilityAudit.criticalViolations || []).length * 10;
     s -= (this.accessibilityAudit.seriousViolations || []).length * 5;
+    s -= (this.abandonedWorkflows || []).length * 15;
+    s -= (this.navigationConfusion || []).length * 10;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -337,6 +349,61 @@ class ReportAggregator {
           },
           url: this.accessibilityAudit.url || null,
           timestamp: this.accessibilityAudit.timestamp || null,
+        },
+      },
+
+      // ════════════════════════════════════════
+      // Workflow Intelligence Section (Pillar 5)
+      // ════════════════════════════════════════
+      workflowIntelligence: {
+        completedWorkflows: {
+          total: this.completedWorkflows.length,
+          workflows: this.completedWorkflows.slice(-50).map(w => ({
+            workflowType: w.workflowType,
+            duration: w.duration,
+            stepsVisited: w.stepsVisited,
+            patientContext: w.patientContext || '',
+            timestamp: w.timestamp,
+          })),
+        },
+        abandonedWorkflows: {
+          total: this.abandonedWorkflows.length,
+          workflows: this.abandonedWorkflows.slice(-50).map(w => ({
+            workflowType: w.workflowType,
+            lastCompletedStep: w.lastCompletedStep,
+            abandonedAt: w.abandonedAt,
+            duration: w.duration,
+            patientContext: w.patientContext || '',
+            timestamp: w.timestamp,
+          })),
+        },
+        slowWorkflows: {
+          total: this.slowWorkflows.length,
+          workflows: this.slowWorkflows.slice(-50).map(w => ({
+            workflowType: w.workflowType,
+            duration: w.duration,
+            threshold: w.threshold,
+            exceededBy: Math.round((w.duration - w.threshold) / 60) + 'm',
+            patientContext: w.patientContext || '',
+            timestamp: w.timestamp,
+          })),
+        },
+        navigationConfusion: {
+          total: this.navigationConfusion.length,
+          incidents: this.navigationConfusion.slice(-50).map(n => ({
+            workflowType: n.workflowType,
+            backtrackCount: n.backtrackCount,
+            sequence: (n.sequence || []).slice(-10),
+            timestamp: n.timestamp,
+          })),
+        },
+        concurrentPatientSessions: {
+          total: this.concurrentPatientSessions.length,
+          sessions: this.concurrentPatientSessions.slice(-50).map(s => ({
+            patientID: s.patientID,
+            tabCount: s.tabCount,
+            timestamp: s.timestamp,
+          })),
         },
       },
 

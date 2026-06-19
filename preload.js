@@ -31,6 +31,15 @@ contextBridge.exposeInMainWorld('inspector', {
     ipcRenderer.send('inspector:layoutShift', { shiftValue });
   },
 
+  // ── Workflow Intelligence (Pillar 5) ──
+  reportWorkflowEvent: (type, data) => {
+    ipcRenderer.send('inspector:reportWorkflow', { type, data });
+  },
+
+  getWorkflowCounts: () => {
+    return ipcRenderer.invoke('inspector:getWorkflowCounts');
+  },
+
   // ── Axe-core Results (Pillar 3 — Accessibility) ──
   reportAxeResults: (results) => {
     ipcRenderer.send('inspector:reportAxeResults', results);
