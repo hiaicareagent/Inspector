@@ -5,6 +5,13 @@ node_modules/
 dist/
 out/
 
+# Reports — session data stays local, never committed
+/reports/*.json
+/reports/screenshots/*
+/reports/heatmap-*.json
+/reports/trends-*.json
+reports/index.json
+
 # Logs
 *.log
 npm-debug.log*
@@ -15,5 +22,8 @@ Thumbs.db
 
 # Editor
 .vscode/settings.json
+
+# Environment
+.env
 
 # Package lock committed (optional, but good practice for Electron apps)

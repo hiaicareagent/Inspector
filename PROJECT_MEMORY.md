@@ -45,6 +45,20 @@ https://github.com/hiaicareagent/Inspector.git
 - Network webRequest listeners registered per-tab on shared session can cause duplicate entries (mitigated by dedup in renderer)
 - No cleanup of main-process event listeners on tab close (minor memory leak over very long sessions)
 
+## Documentation Status: Complete — 2026-06-19
+
+### Documentation Files Created:
+| File | Path | Description |
+|---|---|---|
+| README.md | `/README.md` | Project front door — overview, features, quick start, configuration, output files, architecture overview, compliance standards, license |
+| ARCHITECTURE.md | `/docs/ARCHITECTURE.md` | Deep technical architecture — Electron process model, IPC contract (full handler table), data flow diagrams, security architecture, technology decisions |
+| FUNCTIONAL_SPEC.md | `/docs/FUNCTIONAL_SPEC.md` | Complete functional specification for all 10 audit pillars — behavior, trigger conditions, thresholds, output, clinical rationale |
+| DEPLOYMENT_GUIDE.md | `/docs/DEPLOYMENT_GUIDE.md` | Deployment and operations — system requirements, installation, configuration reference, running audits, interpreting reports, troubleshooting |
+| CLINICAL_RATIONALE.md | `/docs/CLINICAL_RATIONALE.md` | Clinical-facing document for hospital stakeholders — patient safety impact per pillar, recommended audit schedule, governance reporting |
+| REPORT_SCHEMA.md | `/docs/REPORT_SCHEMA.md` | Complete annotated JSON report schema — every field with type, description, and example value for all 10 pillars |
+| CHANGELOG.md | `/CHANGELOG.md` | Keep a Changelog formatted release history — all versions from 0.0.1 to 0.10.0 with Added/Changed/Fixed sections |
+| .gitignore | `/.gitignore` | Updated — excludes reports, screenshots, heatmaps, trends, and index.json from version control |
+
 ## Important Decisions Made:
 - **Electron over WebView2/CEF:** Cross-platform, mature ecosystem, massive library support, full CDP access
 - **No framework:** Keeps the app lightweight and dependency-free; monitoring tools don't need reactive UI complexity
