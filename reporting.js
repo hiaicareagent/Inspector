@@ -41,7 +41,9 @@ class ReportAggregator {
     completedWorkflows, abandonedWorkflows, slowWorkflows,
     navigationConfusion, concurrentPatientSessions,
     expiredTokenRequests, tokenExpiryWarnings, concurrentSessionAnomalies,
-    privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents
+    privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents,
+    clinicalSLABreaches, nonClinicalSLABreaches, highErrorRateEndpoints,
+    clinicalAPIErrors, silentFailures, thirdPartyDependencies
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -89,6 +91,14 @@ class ReportAggregator {
     this.reauthenticationBypassed = reauthenticationBypassed || [];
     this.loginEvents = loginEvents || [];
     this.logoutEvents = logoutEvents || [];
+
+    // Pillar 7 — API Health
+    this.clinicalSLABreaches = clinicalSLABreaches || [];
+    this.nonClinicalSLABreaches = nonClinicalSLABreaches || [];
+    this.highErrorRateEndpoints = highErrorRateEndpoints || [];
+    this.clinicalAPIErrors = clinicalAPIErrors || [];
+    this.silentFailures = silentFailures || [];
+    this.thirdPartyDependencies = thirdPartyDependencies || new Map();
   }
 
   /** ─── Compute Scores ─── */
@@ -106,6 +116,9 @@ class ReportAggregator {
     s -= (this.concurrentSessionAnomalies || []).length * 40;
     s -= (this.privilegeScopeExceeded || []).length * 35;
     s -= (this.reauthenticationBypassed || []).length * 50;
+    // Pillar 7 deductions
+    s -= (this.silentFailures || []).length * 25;
+    s -= (this.highErrorRateEndpoints || []).length * 20;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -133,6 +146,9 @@ class ReportAggregator {
       }
     }
     s -= memWarnings * 15;
+    // Pillar 7 deductions
+    s -= (this.clinicalSLABreaches || []).length * 15;
+    s -= (this.nonClinicalSLABreaches || []).length * 5;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -178,6 +194,19 @@ class ReportAggregator {
     }
     for (const r of (this.reauthenticationBypassed || [])) {
       flags.push({ severity: 'critical', type: 'REAUTHENTICATION_BYPASSED', message: `Session resumed ${Math.round(r.timeSinceLogoffMs/1000)}s after logoff without re-auth`, timestamp: r.timestamp });
+    }
+    // Pillar 7 — API Health flags
+    for (const s of (this.silentFailures || [])) {
+      flags.push({ severity: 'critical', type: 'SILENT_FAILURE', message: `${s.endpoint} returned ${s.statusCode} with no error UI`, timestamp: s.timestamp });
+    }
+    for (const h of (this.highErrorRateEndpoints || [])) {
+      flags.push({ severity: 'warning', type: 'HIGH_ERROR_RATE', message: `${h.endpoint} ${h.errorRate}% error rate`, timestamp: h.timestamp });
+    }
+    for (const c of (this.clinicalAPIErrors || [])) {
+      flags.push({ severity: 'warning', type: 'CLINICAL_API_ERROR', message: `${c.endpoint} returned ${c.statusCode}`, timestamp: c.timestamp });
+    }
+    for (const b of (this.clinicalSLABreaches || [])) {
+      flags.push({ severity: 'warning', type: 'CLINICAL_SLA_BREACH', message: `${b.endpoint} took ${b.duration}ms (threshold ${b.threshold}ms)`, timestamp: b.timestamp });
     }
     // Deduplicate by type+message
     const seen = new Set();
@@ -486,6 +515,104 @@ class ReportAggregator {
             timestamp: s.timestamp,
           })),
         },
+      },
+
+      // ════════════════════════════════════════
+      // API Health Section (Pillar 7)
+      // ════════════════════════════════════════
+      apiHealth: {
+        clinicalSLABreaches: {
+          total: this.clinicalSLABreaches.length,
+          breaches: this.clinicalSLABreaches.slice(-100).map(b => ({
+            url: b.url, duration: b.duration, endpoint: b.endpoint,
+            threshold: b.threshold, timestamp: b.timestamp,
+          })),
+        },
+        nonClinicalSLABreaches: {
+          total: this.nonClinicalSLABreaches.length,
+          breaches: this.nonClinicalSLABreaches.slice(-100).map(b => ({
+            url: b.url, duration: b.duration, endpoint: b.endpoint,
+            threshold: b.threshold, timestamp: b.timestamp,
+          })),
+        },
+        highErrorRateEndpoints: {
+          total: this.highErrorRateEndpoints.length,
+          endpoints: this.highErrorRateEndpoints.slice(-50).map(h => ({
+            endpoint: h.endpoint, errorRate: h.errorRate,
+            sampleSize: h.sampleSize, recentErrors: (h.recentErrors || []).slice(-5),
+            timestamp: h.timestamp,
+          })),
+        },
+        clinicalAPIErrors: {
+          total: this.clinicalAPIErrors.length,
+          errors: this.clinicalAPIErrors.slice(-100).map(e => ({
+            endpoint: e.endpoint, statusCode: e.statusCode,
+            url: e.url, timestamp: e.timestamp,
+          })),
+        },
+        silentFailures: {
+          total: this.silentFailures.length,
+          failures: this.silentFailures.slice(-50).map(f => ({
+            endpoint: f.endpoint, statusCode: f.statusCode,
+            url: f.url, noUIErrorDetected: f.noUIErrorDetected,
+            timestamp: f.timestamp,
+          })),
+        },
+        thirdPartyDependencies: (() => {
+          const deps = [];
+          if (this.thirdPartyDependencies && this.thirdPartyDependencies.forEach) {
+            this.thirdPartyDependencies.forEach((dep, hostname) => {
+              const avgTime = dep.responseTimes.length > 0
+                ? Math.round(dep.responseTimes.reduce((a, b) => a + b, 0) / dep.responseTimes.length)
+                : 0;
+              deps.push({
+                hostname, requestCount: dep.requestCount,
+                avgResponseTime: avgTime, errorCount: dep.errorCount,
+                isSlow: avgTime > 500,
+                isFailing: dep.errorCount > 2,
+              });
+            });
+          }
+          return { total: deps.length, dependencies: deps.sort((a, b) => b.avgResponseTime - a.avgResponseTime) };
+        })(),
+        slowDependencies: (() => {
+          const slow = [];
+          if (this.thirdPartyDependencies && this.thirdPartyDependencies.forEach) {
+            this.thirdPartyDependencies.forEach((dep, hostname) => {
+              const avgTime = dep.responseTimes.length > 0
+                ? Math.round(dep.responseTimes.reduce((a, b) => a + b, 0) / dep.responseTimes.length)
+                : 0;
+              if (avgTime > 500) {
+                slow.push({ hostname, avgResponseTime: avgTime, requestCount: dep.requestCount, errorCount: dep.errorCount });
+              }
+            });
+          }
+          return { total: slow.length, dependencies: slow };
+        })(),
+        failingDependencies: (() => {
+          const failing = [];
+          if (this.thirdPartyDependencies && this.thirdPartyDependencies.forEach) {
+            this.thirdPartyDependencies.forEach((dep, hostname) => {
+              if (dep.errorCount > 2) {
+                failing.push({ hostname, errorCount: dep.errorCount, requestCount: dep.requestCount });
+              }
+            });
+          }
+          return { total: failing.length, dependencies: failing };
+        })(),
+        endpointSummary: (() => {
+          // Provide summary from endpointStats — passed as clinicalSLABreaches-derived
+          const endpoints = {};
+          for (const b of this.clinicalSLABreaches) {
+            if (!endpoints[b.endpoint]) endpoints[b.endpoint] = { slaBreaches: 0, avgDuration: 0 };
+            endpoints[b.endpoint].slaBreaches++;
+          }
+          for (const b of this.nonClinicalSLABreaches) {
+            if (!endpoints[b.endpoint]) endpoints[b.endpoint] = { slaBreaches: 0, avgDuration: 0 };
+            endpoints[b.endpoint].slaBreaches++;
+          }
+          return Object.entries(endpoints).map(([name, data]) => ({ endpoint: name, ...data }));
+        })(),
       },
 
       // ════════════════════════════════════════

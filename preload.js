@@ -54,6 +54,11 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getSessionCounts');
   },
 
+  // ── API Health (Pillar 7) ──
+  getApiHealthCounts: () => {
+    return ipcRenderer.invoke('inspector:getApiHealthCounts');
+  },
+
   // ── Report Generation ──
   generateReport: () => {
     return ipcRenderer.invoke('inspector:generateReport');

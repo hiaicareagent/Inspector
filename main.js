@@ -93,6 +93,35 @@ const ROLE_SCOPE_MAP = {
   'admin': new Set(['*']),
 }
 
+// ── API Health stores (Pillar 7) ──
+const apiRequestTimestamps = new Map(); // requestId -> { url, startTime }
+const endpointStats = new Map(); // host+path prefix -> { times: [], statusCodes: [], errors: [] }
+const thirdPartyDependencies = new Map(); // hostname -> { requestCount, responseTimes: [], errorCount }
+const clinicalSLABreaches = [];
+const nonClinicalSLABreaches = [];
+const highErrorRateEndpoints = [];
+const clinicalAPIErrors = [];
+const silentFailures = [];
+
+const CLINICAL_ENDPOINTS = ['/patient', '/medication', '/lab', '/order', '/allergy', '/alert'];
+
+function normalizeEndpoint(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase();
+    for (const prefix of CLINICAL_ENDPOINTS) {
+      if (path.includes(prefix)) return u.hostname + prefix;
+    }
+    // Get first path segment
+    const seg = '/' + path.split('/').filter(Boolean)[0];
+    return u.hostname + (seg || '/');
+  } catch (e) { return url; }
+}
+
+function getHostname(url) {
+  try { return new URL(url).hostname; } catch (e) { return url; }
+}
+
 // ── Telemetry-specific stores (Pillar 4) ──
 const consoleErrors = [];
 const consoleWarnings = [];
@@ -728,6 +757,220 @@ function setupNetworkInterception() {
   } catch (err) {
     console.error('[Inspector:Network] Failed to setup network interception:', err.message);
   }
+}
+
+// ──────────────────────────────────────────────
+// API Health Monitoring (Pillar 7)
+// ──────────────────────────────────────────────
+
+function setupAPIHealthMonitoring() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const filter = { urls: ['http://*/*', 'https://*/*'] };
+
+  // Track request start times and third-party domains on beforeRequest
+  session.defaultSession.webRequest.onBeforeRequest(filter, (details, callback) => {
+    try {
+      // Track start time
+      apiRequestTimestamps.set(details.id, { url: details.url, startTime: Date.now() });
+
+      // Third-party dependency mapping
+      const baseHostname = getHostname(TARGET_URL);
+      const reqHostname = getHostname(details.url);
+      if (reqHostname !== baseHostname) {
+        if (!thirdPartyDependencies.has(reqHostname)) {
+          thirdPartyDependencies.set(reqHostname, { requestCount: 0, responseTimes: [], errorCount: 0 });
+        }
+      }
+    } catch (_) {}
+    callback({ cancel: false });
+  });
+
+  // Monitor onCompleted for SLA, error rate, silent failure detection
+  session.defaultSession.webRequest.onCompleted(filter, (details) => {
+    try {
+      const now = Date.now();
+      const startRecord = apiRequestTimestamps.get(details.id);
+      if (!startRecord) return;
+
+      const duration = now - startRecord.startTime;
+      const url = details.url;
+      const statusCode = details.statusCode || 0;
+      const endpointKey = normalizeEndpoint(url);
+      const baseHostname = getHostname(TARGET_URL);
+      const reqHostname = getHostname(url);
+
+      // ── 1. Update endpoint stats ──
+      if (!endpointStats.has(endpointKey)) {
+        endpointStats.set(endpointKey, { times: [], statusCodes: [], errors: [], name: endpointKey });
+      }
+      const stats = endpointStats.get(endpointKey);
+      stats.times.push(duration);
+      stats.statusCodes.push(statusCode);
+      // Keep rolling window of last 20
+      if (stats.times.length > 20) { stats.times.shift(); stats.statusCodes.shift(); }
+
+      // ── 2. SLA breach detection ──
+      const isClinical = CLINICAL_ENDPOINTS.some(p => url.toLowerCase().includes(p));
+      if (isClinical && duration > 2000) {
+        if (!clinicalSLABreaches.find(b => b.url === url && Math.abs(new Date(b.timestamp) - now) < 30000)) {
+          const entry = { url, duration, threshold: 2000, type: 'CLINICAL_SLA_BREACH', endpoint: endpointKey, timestamp: new Date().toISOString() };
+          clinicalSLABreaches.push(entry);
+          console.warn(`[Inspector:API] ⚠ CLINICAL_SLA_BREACH: ${endpointKey} took ${duration}ms (threshold 2000ms)`);
+        }
+      } else if (!isClinical && duration > 5000) {
+        if (!nonClinicalSLABreaches.find(b => b.url === url && Math.abs(new Date(b.timestamp) - now) < 30000)) {
+          const entry = { url, duration, threshold: 5000, type: 'NON_CLINICAL_SLA_BREACH', endpoint: endpointKey, timestamp: new Date().toISOString() };
+          nonClinicalSLABreaches.push(entry);
+          console.warn(`[Inspector:API] ⚠ NON_CLINICAL_SLA_BREACH: ${endpointKey} took ${duration}ms (threshold 5000ms)`);
+        }
+      }
+
+      // ── 3. Error rate monitoring ──
+      if (statusCode >= 400) {
+        stats.errors.push({ statusCode, url, timestamp: new Date().toISOString() });
+
+        // Individual clinical API 5xx error
+        if (isClinical && statusCode >= 500) {
+          const entry = { endpoint: endpointKey, statusCode, url, timestamp: new Date().toISOString() };
+          clinicalAPIErrors.push(entry);
+          errorLog.push({ source: 'API', message: `CLINICAL_API_ERROR: ${endpointKey} returned ${statusCode}`, stack: url, timestamp: entry.timestamp });
+          console.warn(`[Inspector:API] ⚠ CLINICAL_API_ERROR: ${endpointKey} returned ${statusCode}`);
+        }
+
+        // Rolling window error rate check
+        const totalInWindow = stats.statusCodes.length;
+        const errorsInWindow = stats.statusCodes.filter(c => c >= 400).length;
+        const errorRate = totalInWindow > 0 ? (errorsInWindow / totalInWindow) * 100 : 0;
+        if (isClinical && errorRate > 10 && totalInWindow >= 5) {
+          if (!highErrorRateEndpoints.find(h => h.endpoint === endpointKey && Math.abs(new Date(h.timestamp) - now) < 60000)) {
+            const recentErrors = stats.errors.slice(-5);
+            const entry = { endpoint: endpointKey, errorRate: parseFloat(errorRate.toFixed(1)), sampleSize: totalInWindow, recentErrors, timestamp: new Date().toISOString() };
+            highErrorRateEndpoints.push(entry);
+            complianceLog.push({ standard: 'HIPAA', check: `HIGH_ERROR_RATE: ${endpointKey} ${errorRate.toFixed(1)}%`, passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+            console.warn(`[Inspector:API] ⚠ HIGH_ERROR_RATE: ${endpointKey} ${errorRate.toFixed(1)}% error rate (sample: ${totalInWindow})`);
+          }
+        }
+
+        // ── 4. Silent failure detection (4xx/5xx on clinical endpoint) ──
+        if (isClinical && mainWindow && !mainWindow.isDestroyed()) {
+          setTimeout(() => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            mainWindow.webContents.executeJavaScript(`
+              (function() {
+                try {
+                  var body = document.body;
+                  if (!body) return null;
+                  var text = (body.innerText || body.textContent || '').substring(0, 10000).toLowerCase();
+                  var hasAlert = !!document.querySelector('[role="alert"], [role="dialog"], .error, .warning, .alert, .toast-error, .notification-error');
+                  var hasErrorText = /failed|error|unavailable|something went wrong|try again|unexpected error/i.test(text);
+                  if (!hasAlert && !hasErrorText) {
+                    return JSON.stringify({ silentFailure: true, hasAlert: hasAlert, hasErrorText: hasErrorText });
+                  }
+                  return null;
+                } catch(e) { return null; }
+              })()
+            `).then((result) => {
+              if (result) {
+                try {
+                  const parsed = JSON.parse(result);
+                  if (parsed && parsed.silentFailure) {
+                    if (!silentFailures.find(s => s.url === url && Math.abs(new Date(s.timestamp) - Date.now()) < 60000)) {
+                      const entry = { endpoint: endpointKey, statusCode, url, noUIErrorDetected: true, timestamp: new Date().toISOString() };
+                      silentFailures.push(entry);
+                      complianceLog.push({ standard: 'HIPAA', check: `SILENT_FAILURE: ${endpointKey} ${statusCode}`, passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+                      console.warn(`[Inspector:API] ⚠ SILENT_FAILURE: ${endpointKey} returned ${statusCode} with no error UI`);
+                    }
+                  }
+                } catch (_) {}
+              }
+            }).catch(() => {});
+          }, 1000);
+        }
+      }
+
+      // ── 5. Third-party dependency tracking ──
+      if (reqHostname !== baseHostname && thirdPartyDependencies.has(reqHostname)) {
+        const dep = thirdPartyDependencies.get(reqHostname);
+        dep.requestCount++;
+        dep.responseTimes.push(duration);
+        if (statusCode >= 400) dep.errorCount++;
+        // Keep sliding window of last 20 response times for avg calc
+        if (dep.responseTimes.length > 20) dep.responseTimes.shift();
+
+        // Flag SLOW_DEPENDENCY if average crosses 500ms threshold
+        if (dep.responseTimes.length >= 3) {
+          const avgTime = dep.responseTimes.reduce((a, b) => a + b, 0) / dep.responseTimes.length;
+          if (avgTime > 500 && !dep._slowFlagged) {
+            dep._slowFlagged = true;
+            console.warn(`[Inspector:API] ⚠ SLOW_DEPENDENCY: ${reqHostname} avg ${Math.round(avgTime)}ms (threshold 500ms)`);
+          }
+        }
+
+        // Flag FAILING_DEPENDENCY if >2 errors
+        if (dep.errorCount > 2 && !dep._failingFlagged) {
+          dep._failingFlagged = true;
+          console.warn(`[Inspector:API] ⚠ FAILING_DEPENDENCY: ${reqHostname} has ${dep.errorCount} errors (${dep.requestCount} requests)`);
+        }
+      }
+
+      // Cleanup stored start time
+      apiRequestTimestamps.delete(details.id);
+      if (apiRequestTimestamps.size > 10000) {
+        // Emergency cleanup — clear old entries
+        const toDelete = [...apiRequestTimestamps.keys()].slice(0, apiRequestTimestamps.size - 5000);
+        for (const k of toDelete) apiRequestTimestamps.delete(k);
+      }
+    } catch (e) {
+      if (e && e.message) {
+        console.warn('[Inspector:API] Tracking error:', e.message.substring(0, 200));
+      }
+    }
+  });
+
+  console.log('[Inspector:API] API health monitoring enabled (SLA, error rate, silent failure, third-party deps).');
+}
+
+function getSlowDependencies() {
+  const slow = [];
+  for (const [hostname, dep] of thirdPartyDependencies) {
+    if (dep.responseTimes.length > 0) {
+      const avg = dep.responseTimes.reduce((a, b) => a + b, 0) / dep.responseTimes.length;
+      if (avg > 500) {
+        slow.push({ hostname, avgResponseTime: Math.round(avg), requestCount: dep.requestCount, errorCount: dep.errorCount });
+      }
+    }
+  }
+  return slow;
+}
+
+function getFailingDependencies() {
+  const failing = [];
+  for (const [hostname, dep] of thirdPartyDependencies) {
+    if (dep.errorCount > 2) {
+      failing.push({ hostname, errorCount: dep.errorCount, requestCount: dep.requestCount });
+    }
+  }
+  return failing;
+}
+
+function getEndpointSummary() {
+  const summary = [];
+  for (const [key, stats] of endpointStats) {
+    if (stats.times.length > 0) {
+      const avgTime = stats.times.reduce((a, b) => a + b, 0) / stats.times.length;
+      const errorCount = stats.statusCodes.filter(c => c >= 400).length;
+      summary.push({
+        endpoint: key,
+        requestCount: stats.times.length,
+        avgResponseTime: Math.round(avgTime),
+        maxResponseTime: Math.max(...stats.times),
+        errorCount,
+        errorRate: parseFloat(((errorCount / stats.times.length) * 100).toFixed(1)),
+      });
+    }
+  }
+  return summary.sort((a, b) => b.avgResponseTime - a.avgResponseTime);
 }
 
 // ──────────────────────────────────────────────
@@ -1874,7 +2117,10 @@ function setupIPC() {
         navigationConfusion, concurrentPatientSessions,
         // Pillar 6
         expiredTokenRequests, tokenExpiryWarnings, concurrentSessionAnomalies,
-        privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents
+        privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents,
+        // Pillar 7
+        clinicalSLABreaches, nonClinicalSLABreaches, highErrorRateEndpoints,
+        clinicalAPIErrors, silentFailures, thirdPartyDependencies
       );
       const filePath = aggregator.generateReport();
       return { success: true, filePath };
@@ -1949,6 +2195,23 @@ function setupIPC() {
     };
   });
 
+  // ── API Health IPC (Pillar 7) ──
+
+  ipcMain.handle('inspector:getApiHealthCounts', async () => {
+    const slowDeps = getSlowDependencies();
+    const failingDeps = getFailingDependencies();
+    return {
+      clinicalSLABreaches: clinicalSLABreaches.length,
+      nonClinicalSLABreaches: nonClinicalSLABreaches.length,
+      highErrorRateEndpoints: highErrorRateEndpoints.length,
+      clinicalAPIErrors: clinicalAPIErrors.length,
+      silentFailures: silentFailures.length,
+      thirdPartyDependencies: thirdPartyDependencies.size,
+      slowDependencies: slowDeps.length,
+      failingDependencies: failingDeps.length,
+    };
+  });
+
   ipcMain.handle('inspector:getSummaryScores', async () => {
     const complianceScore = _computeComplianceScore();
     const uxScore = _computeUXScore();
@@ -1980,6 +2243,9 @@ function _computeComplianceScore() {
   score -= concurrentSessionAnomalies.length * 40;
   score -= privilegeScopeExceeded.length * 35;
   score -= reauthenticationBypassed.length * 50;
+  // Pillar 7 deductions
+  score -= silentFailures.length * 25;
+  score -= highErrorRateEndpoints.length * 20;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2012,6 +2278,9 @@ function _computePerformanceScore() {
     }
   }
   score -= memoryLeakCount * 15;
+  // Pillar 7 deductions
+  score -= clinicalSLABreaches.length * 15;
+  score -= nonClinicalSLABreaches.length * 5;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -2029,6 +2298,7 @@ app.whenReady().then(() => {
   startMemoryMonitoring();
   startTrace();
   setupNetworkInterception();
+  setupAPIHealthMonitoring();
   startAutoLogoffAudit();
 
   mainWindow.webContents.on('did-finish-load', () => {
