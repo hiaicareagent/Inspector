@@ -45,6 +45,15 @@ contextBridge.exposeInMainWorld('inspector', {
     ipcRenderer.send('inspector:reportAxeResults', results);
   },
 
+  // ── Session Integrity (Pillar 6) ──
+  reportSessionEvent: (type, data) => {
+    ipcRenderer.send('inspector:reportSessionEvent', { type, data });
+  },
+
+  getSessionCounts: () => {
+    return ipcRenderer.invoke('inspector:getSessionCounts');
+  },
+
   // ── Report Generation ──
   generateReport: () => {
     return ipcRenderer.invoke('inspector:generateReport');

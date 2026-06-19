@@ -39,7 +39,9 @@ class ReportAggregator {
     consoleErrors, consoleWarnings, rendererCrashes,
     sessionStartTime, electronVersion, targetUrl,
     completedWorkflows, abandonedWorkflows, slowWorkflows,
-    navigationConfusion, concurrentPatientSessions
+    navigationConfusion, concurrentPatientSessions,
+    expiredTokenRequests, tokenExpiryWarnings, concurrentSessionAnomalies,
+    privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -78,6 +80,15 @@ class ReportAggregator {
     this.slowWorkflows = slowWorkflows || [];
     this.navigationConfusion = navigationConfusion || [];
     this.concurrentPatientSessions = concurrentPatientSessions || [];
+
+    // Pillar 6 — Session Integrity
+    this.expiredTokenRequests = expiredTokenRequests || [];
+    this.tokenExpiryWarnings = tokenExpiryWarnings || [];
+    this.concurrentSessionAnomalies = concurrentSessionAnomalies || [];
+    this.privilegeScopeExceeded = privilegeScopeExceeded || [];
+    this.reauthenticationBypassed = reauthenticationBypassed || [];
+    this.loginEvents = loginEvents || [];
+    this.logoutEvents = logoutEvents || [];
   }
 
   /** ─── Compute Scores ─── */
@@ -90,6 +101,11 @@ class ReportAggregator {
     s -= this.phiUnencryptedTransmissions.length * 30;
     s -= this.autoLogoffViolations.length * 20;
     s -= (this.concurrentPatientSessions || []).length * 20;
+    // Pillar 6 deductions
+    s -= (this.expiredTokenRequests || []).length * 30;
+    s -= (this.concurrentSessionAnomalies || []).length * 40;
+    s -= (this.privilegeScopeExceeded || []).length * 35;
+    s -= (this.reauthenticationBypassed || []).length * 50;
     return Math.max(0, Math.min(100, s));
   }
 
@@ -149,6 +165,19 @@ class ReportAggregator {
     }
     for (const c of this.rendererCrashes) {
       flags.push({ severity: 'critical', type: c.type, message: c.reason || 'Unresponsive', timestamp: c.timestamp });
+    }
+    // Pillar 6 — Session Integrity flags
+    for (const e of (this.expiredTokenRequests || [])) {
+      flags.push({ severity: 'critical', type: 'EXPIRED_TOKEN_REQUEST', message: `Expired token used: ${e.url}`, timestamp: e.requestTimestamp || e.timestamp });
+    }
+    for (const c of (this.concurrentSessionAnomalies || [])) {
+      flags.push({ severity: 'critical', type: 'CONCURRENT_SESSION_ANOMALY', message: `Same token from ${c.userAgents?.length || 0} different user-agents`, timestamp: c.timestamp });
+    }
+    for (const p of (this.privilegeScopeExceeded || [])) {
+      flags.push({ severity: 'critical', type: 'PRIVILEGE_SCOPE_EXCEEDED', message: `Role "${p.role}" accessed ${p.unexpectedResourceType}`, timestamp: p.timestamp });
+    }
+    for (const r of (this.reauthenticationBypassed || [])) {
+      flags.push({ severity: 'critical', type: 'REAUTHENTICATION_BYPASSED', message: `Session resumed ${Math.round(r.timeSinceLogoffMs/1000)}s after logoff without re-auth`, timestamp: r.timestamp });
     }
     // Deduplicate by type+message
     const seen = new Set();
@@ -243,6 +272,58 @@ class ReportAggregator {
           })),
         },
         traceFilePath: this.traceFilePath,
+      },
+
+      // ════════════════════════════════════════
+      // Session Integrity Section (Pillar 6)
+      // ════════════════════════════════════════
+      sessionIntegrity: {
+        expiredTokenRequests: {
+          total: this.expiredTokenRequests.length,
+          entries: this.expiredTokenRequests.slice(-50).map(e => ({
+            url: e.url, tokenExpiredAt: e.tokenExpiredAt,
+            requestTimestamp: e.requestTimestamp || e.timestamp,
+          })),
+        },
+        tokenExpiryWarnings: {
+          total: this.tokenExpiryWarnings.length,
+          entries: this.tokenExpiryWarnings.slice(-50).map(e => ({
+            url: e.url, tokenExpiresAt: e.tokenExpiresAt,
+            expiresInMinutes: e.expiresInMinutes,
+          })),
+        },
+        concurrentSessionAnomalies: {
+          total: this.concurrentSessionAnomalies.length,
+          anomalies: this.concurrentSessionAnomalies.slice(-50).map(a => ({
+            tokenHash: (a.tokenHash || '').substring(0, 12) + '...',
+            userAgents: a.userAgents,
+            timestamp: a.timestamp,
+          })),
+        },
+        privilegeScopeExceeded: {
+          total: this.privilegeScopeExceeded.length,
+          entries: this.privilegeScopeExceeded.slice(-50).map(p => ({
+            role: p.role, unexpectedResourceType: p.unexpectedResourceType,
+            url: p.url, timestamp: p.timestamp,
+          })),
+        },
+        reauthenticationBypassed: {
+          total: this.reauthenticationBypassed.length,
+          entries: this.reauthenticationBypassed.slice(-50).map(r => ({
+            lastLogoffTime: r.lastLogoffTime,
+            timeSinceLogoffMs: r.timeSinceLogoffMs,
+            subsequentRequestUrl: r.subsequentRequestUrl,
+            timestamp: r.timestamp,
+          })),
+        },
+        loginEvents: {
+          total: this.loginEvents.length,
+          events: this.loginEvents.slice(-50).map(l => ({ url: l.url, timestamp: l.timestamp })),
+        },
+        logoutEvents: {
+          total: this.logoutEvents.length,
+          events: this.logoutEvents.slice(-50).map(l => ({ url: l.url, timestamp: l.timestamp })),
+        },
       },
 
       // ════════════════════════════════════════
@@ -491,10 +572,15 @@ class ReportAggregator {
       if (c.passed) groups[c.standard].passed++;
       else groups[c.standard].failed++;
     }
+    // Add session integrity by type (JWT, HIPAA for concurrent sessions/reauth)
+    const authGroups = {
+      'JWT': { expired: this.expiredTokenRequests.length, warnings: this.tokenExpiryWarnings.length, scope: this.privilegeScopeExceeded.length },
+      'HIPAA_SESSION': { concurrent: this.concurrentSessionAnomalies.length, reauthBypass: this.reauthenticationBypassed.length },
+    };
     for (const [key, val] of Object.entries(groups)) {
       val.passRate = ((val.passed / val.total) * 100).toFixed(1) + '%';
     }
-    return groups;
+    return { ...groups, _authSummary: authGroups };
   }
 
   _summarizeUX() {

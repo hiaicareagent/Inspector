@@ -20,6 +20,7 @@ const REPORTS_DIR = path.join(__dirname, 'reports');
 const SCREENSHOTS_DIR = path.join(REPORTS_DIR, 'screenshots');
 const FHIR_SCHEMA_PATH = path.join(__dirname, 'fhir-r4-schema.json');
 const TARGET_URL = process.env.INSPECTOR_TARGET_URL || 'https://example.com';
+
 const MEMORY_POLL_MS = 10000;
 const MEMORY_LEAK_THRESHOLD_MB = 500;
 const TRACE_AUTO_STOP_MS = 30000;
@@ -74,6 +75,23 @@ const abandonedWorkflows = [];
 const slowWorkflows = [];
 const navigationConfusion = [];
 const concurrentPatientSessions = [];
+
+// ── Session Integrity stores (Pillar 6) ──
+const expiredTokenRequests = [];
+const tokenExpiryWarnings = [];
+const concurrentSessionAnomalies = [];
+const privilegeScopeExceeded = [];
+const reauthenticationBypassed = [];
+const loginEvents = [];
+const logoutEvents = [];
+const concurrentSessionMap = new Map(); // tokenHash -> [{ userAgent, firstSeen }]
+let lastAutoLogoffTime = null; // for re-authentication audit
+
+const ROLE_SCOPE_MAP = {
+  'nurse': new Set(['Patient','Observation','MedicationAdministration']),
+  'doctor': new Set(['Patient','Observation','MedicationRequest','DiagnosticReport']),
+  'admin': new Set(['*']),
+}
 
 // ── Telemetry-specific stores (Pillar 4) ──
 const consoleErrors = [];
@@ -325,6 +343,33 @@ function validateFHIRResource(url, bodyText) {
   return violations;
 }
 
+/**
+ * Decode a JWT token payload (base64url-encoded JSON) — no signature verification.
+ * Returns null if the token is not parseable.
+ */
+function decodeJWTPayload(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    // JWT uses base64url (RFC 4648 §5): replace URL-safe chars and pad
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const payload = Buffer.from(b64, 'base64').toString('utf-8');
+    return JSON.parse(payload);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Derive a lightweight token hash from the first 20 chars of the encoded JWT (non-reversible fingerprint)
+ */
+function tokenFingerprint(token) {
+  if (!token) return '';
+  // Use the first 20 chars of the raw token as a lightweight fingerprint
+  return token.substring(0, 20);
+}
+
 // ──────────────────────────────────────────────
 // Content Tracing (Pillar 1)
 // ──────────────────────────────────────────────
@@ -469,6 +514,126 @@ function setupNetworkInterception() {
     callback({ cancel: false });
   });
 
+  // ── Pillar 6: Session Integrity JWT monitoring via onBeforeSendHeaders ──
+  try {
+    session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
+      try {
+        const reqHeaders = details.requestHeaders || {};
+        const authHeader = reqHeaders['Authorization'] || reqHeaders['authorization'] || '';
+
+        if (authHeader.startsWith('Bearer ')) {
+          const token = authHeader.substring(7).trim();
+          const payload = decodeJWTPayload(token);
+
+          if (payload) {
+            const nowSec = Date.now() / 1000;
+
+            // 1. Check token expiry
+            if (payload.exp) {
+              if (payload.exp < nowSec) {
+                // Token is already expired
+                if (!expiredTokenRequests.find(e => e.url === details.url && Math.abs(new Date(e.timestamp) - Date.now()) < 60000)) {
+                  const entry = {
+                    url: details.url,
+                    tokenExpiredAt: new Date(payload.exp * 1000).toISOString(),
+                    requestTimestamp: new Date().toISOString(),
+                  };
+                  expiredTokenRequests.push(entry);
+                  complianceLog.push({ standard: 'JWT', check: 'EXPIRED_TOKEN_REQUEST', passed: false, details: JSON.stringify(entry), timestamp: entry.requestTimestamp });
+                  console.warn(`[Inspector:Session] ⚠ EXPIRED_TOKEN_REQUEST: Token expired at ${entry.tokenExpiredAt} — ${details.url}`);
+                }
+              } else if (payload.exp - nowSec < 300) {
+                // Token expires within 5 minutes
+                const expiresInMin = Math.round((payload.exp - nowSec) / 60);
+                if (!tokenExpiryWarnings.find(e => e.url === details.url && Math.abs(new Date(e.timestamp) - Date.now()) < 60000)) {
+                  const entry = {
+                    url: details.url,
+                    tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+                    expiresInMinutes: expiresInMin,
+                    requestTimestamp: new Date().toISOString(),
+                  };
+                  tokenExpiryWarnings.push(entry);
+                  complianceLog.push({ standard: 'JWT', check: 'TOKEN_EXPIRY_WARNING', passed: false, details: JSON.stringify(entry), timestamp: entry.requestTimestamp });
+                  console.warn(`[Inspector:Session] ⚠ TOKEN_EXPIRY_WARNING: Token expires in ${expiresInMin}min — ${details.url}`);
+                }
+              }
+            }
+
+            // 2. Concurrent session detection
+            const fp = tokenFingerprint(token);
+            const userAgent = reqHeaders['User-Agent'] || reqHeaders['user-agent'] || 'unknown';
+            if (fp) {
+              if (concurrentSessionMap.has(fp)) {
+                const sessions = concurrentSessionMap.get(fp);
+                // Check if this is a different user-agent than what we've seen
+                const seenUA = sessions.some(s => s.userAgent === userAgent);
+                if (!seenUA) {
+                  sessions.push({ userAgent, firstSeen: new Date().toISOString() });
+                  const uaList = sessions.map(s => s.userAgent);
+                  if (!concurrentSessionAnomalies.find(a => a.tokenHash === fp && Math.abs(new Date(a.timestamp) - Date.now()) < 120000)) {
+                    const entry = { tokenHash: fp, userAgents: uaList, timestamp: new Date().toISOString() };
+                    concurrentSessionAnomalies.push(entry);
+                    complianceLog.push({ standard: 'HIPAA', check: 'CONCURRENT_SESSION_ANOMALY', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+                    console.warn(`[Inspector:Session] ⚠ CONCURRENT_SESSION_ANOMALY: Token hash ${fp.substring(0, 8)}... seen with different User-Agents: ${uaList.join(', ')}`);
+                  }
+                }
+              } else {
+                concurrentSessionMap.set(fp, [{ userAgent, firstSeen: new Date().toISOString() }]);
+              }
+            }
+
+            // 3. Detect role for privilege scope check
+            const detectedRole = payload.role || (payload.groups && Array.isArray(payload.groups) ? payload.groups[0] : null) || null;
+            if (detectedRole && ROLE_SCOPE_MAP[detectedRole]) {
+              currentJwtRole = detectedRole;
+            }
+
+            // 4. Re-authentication audit — detect auth requests after auto-logoff
+            if (lastAutoLogoffTime) {
+              const timeSinceLogoffMs = Date.now() - lastAutoLogoffTime;
+              if (timeSinceLogoffMs < 60000) {
+                // An auth request happened within 60s of logoff — this is expected re-authentication
+                // Check if this looks like a token refresh / login endpoint
+                const urlLower = details.url.toLowerCase();
+                if (/auth|login|token|signin|connect\/token|oauth|saml|openid/i.test(urlLower) && details.url !== (lastAutoLogoffUrl || '')) {
+                  // Re-authentication detected — clear the flag
+                  lastAutoLogoffTime = null;
+                  lastAutoLogoffUrl = null;
+                }
+              } else if (timeSinceLogoffMs > 60000) {
+                // More than 60s after logoff — if we see a resource request, it may be bypassed re-authentication
+                // Only flag once
+                if (lastAutoLogoffTime && !reauthenticationBypassed.find(r => Math.abs(new Date(r.timestamp) - Date.now()) < 120000)) {
+                  // Check if this is a regular API call made without re-auth
+                  const urlLower = details.url.toLowerCase();
+                  if (!/auth|login|token|signin/i.test(urlLower)) {
+                    const entry = {
+                      lastLogoffTime: new Date(lastAutoLogoffTime).toISOString(),
+                      timeSinceLogoffMs,
+                      subsequentRequestUrl: details.url,
+                      timestamp: new Date().toISOString(),
+                    };
+                    reauthenticationBypassed.push(entry);
+                    complianceLog.push({ standard: 'HIPAA', check: 'REAUTHENTICATION_BYPASSED', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+                    console.warn(`[Inspector:Session] ⚠ REAUTHENTICATION_BYPASSED: ${Math.round(timeSinceLogoffMs/1000)}s after logoff without re-auth — ${details.url}`);
+                    lastAutoLogoffTime = null;
+                    lastAutoLogoffUrl = null;
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Silently handle errors in JWT parsing
+      }
+      callback({ cancel: false });
+    });
+    console.log('[Inspector:Session] JWT monitoring enabled (expiry, concurrent sessions, re-auth audit).');
+  } catch (err) {
+    console.error('[Inspector:Session] Failed to setup JWT monitoring:', err.message);
+  }
+
   try {
     const dbg = mainWindow.webContents.debugger;
     if (!dbg.isAttached()) { dbg.attach('1.3'); }
@@ -496,6 +661,14 @@ function setupNetworkInterception() {
                 complianceLog.push({ standard: 'FHIR_R4', check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`, passed: false, details: JSON.stringify(v), timestamp: v.timestamp });
                 console.warn(`[Inspector:FHIR] ⚠ ${v.errorType} — ${response.url}: ${v.errorDetails}`);
               }
+              // ── Privilege Scope Check (Pillar 6) ──
+              try {
+                const parsedBody = JSON.parse(bodyText);
+                const resourceType = parsedBody && parsedBody.resourceType;
+                if (resourceType && currentJwtRole) {
+                  _checkPrivilegeScope(currentJwtRole, resourceType, response.url);
+                }
+              } catch (_) {}
             } catch (bodyErr) {
               if (!bodyErr.message.includes('No resource')) {
                 console.warn('[Inspector:Network] Could not get response body:', bodyErr.message);
@@ -519,6 +692,8 @@ function setupNetworkInterception() {
           }
         }
 
+        // ── (Pillar 6: currentJwtRole is set at module level in onBeforeSendHeaders) ──
+
         if (!contentTypeLower.includes('application/fhir+json') && type === 'XHR') {
           const fhirPattern = /\/(fhir|r4|metadata|patient|observation|condition|encounter|medication|procedure|diagnosticreport|bundle)\b/i;
           if (fhirPattern.test(response.url.toLowerCase())) {
@@ -534,6 +709,10 @@ function setupNetworkInterception() {
                       fhirViolations.push(v);
                       complianceLog.push({ standard: 'FHIR_R4', check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`, passed: false, details: JSON.stringify(v), timestamp: v.timestamp });
                       console.warn(`[Inspector:FHIR] ⚠ ${v.errorType} — ${response.url}: ${v.errorDetails}`);
+                    }
+                    // ── Privilege Scope Check (Pillar 6) [fallback pattern] ──
+                    if (parsed.resourceType && currentJwtRole) {
+                      _checkPrivilegeScope(currentJwtRole, parsed.resourceType, response.url);
                     }
                   }
                 } catch (_) { /* not JSON */ }
@@ -580,6 +759,9 @@ function checkIdleTime() {
         autoLogoffViolations.push(entry);
         complianceLog.push({ standard: 'HIPAA', check: 'AUTOLOGOFF_FAILURE', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
         console.warn(`[Inspector:AutoLogoff] ⚠ AUTOLOGOFF_FAILURE: idle ${Math.round(effectiveInactiveMs/60000)}min exceeds ${AUTOLOGOFF_TIMEOUT_MS/60000}min limit.`);
+        // ── Pillar 6: Set last auto-logoff time for re-authentication audit ──
+        lastAutoLogoffTime = Date.now();
+        lastAutoLogoffUrl = mainWindow ? mainWindow.webContents.getURL() : '';
       }
     }
   } catch (err) {
@@ -1336,6 +1518,116 @@ function injectWorkflowIntelligence() {
 }
 
 // ──────────────────────────────────────────────
+// Privilege Scope Check (Pillar 6)
+// ──────────────────────────────────────────────
+
+function _checkPrivilegeScope(role, resourceType, url) {
+  const allowed = ROLE_SCOPE_MAP[role];
+  if (!allowed) return;
+
+  // '*' means all resources allowed
+  if (allowed.has('*')) return;
+
+  if (!allowed.has(resourceType)) {
+    // Check if already flagged recently
+    if (!privilegeScopeExceeded.find(p => p.url === url && Math.abs(new Date(p.timestamp) - Date.now()) < 60000)) {
+      const entry = { role, unexpectedResourceType: resourceType, url, timestamp: new Date().toISOString() };
+      privilegeScopeExceeded.push(entry);
+      complianceLog.push({ standard: 'JWT', check: 'PRIVILEGE_SCOPE_EXCEEDED', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+      console.warn(`[Inspector:Session] ⚠ PRIVILEGE_SCOPE_EXCEEDED: Role "${role}" accessed "${resourceType}" at ${url}`);
+    }
+  }
+}
+
+// ── Re-authentication audit variables ──
+let lastAutoLogoffUrl = null;
+
+// ── Module-level JWT role (set in onBeforeSendHeaders, read in CDP handler) ──
+let currentJwtRole = null;
+
+// ──────────────────────────────────────────────
+// Inject Login/Logout DOM Detector (Pillar 6)
+// ──────────────────────────────────────────────
+
+function injectLoginLogoutDetector() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorLoginInjected) return;
+      window.__inspectorLoginInjected = true;
+
+      var lastLoginReportUrl = '';
+      var lastLogoutReportUrl = '';
+
+      // ── Login detection via DOM scanning ──
+      function scanForLoginUI() {
+        try {
+          var url = window.location.href;
+          var body = document.body;
+          if (!body) return;
+
+          // Check for password inputs (login form present)
+          var passwordInputs = document.querySelectorAll('input[type="password"]');
+          var submitButtons = document.querySelectorAll('button[type="submit"], input[type="submit"]');
+
+          if (passwordInputs.length > 0 && submitButtons.length > 0) {
+            if (url !== lastLoginReportUrl) {
+              lastLoginReportUrl = url;
+              window.inspector.reportCompliance('AUTH', 'LOGIN_EVENT: Login form detected at ' + url, true, JSON.stringify({ url: url, hasPasswordField: true, hasSubmit: true, timestamp: new Date().toISOString() }));
+            }
+          }
+        } catch(e) {}
+      }
+
+      // ── Logout detection via URL and text scanning ──
+      function scanForLogoutUI() {
+        try {
+          var url = window.location.href;
+          var urlLower = url.toLowerCase();
+          var body = document.body;
+          if (!body) return;
+
+          var isLogoutURL = /\\/logout|\\/signout|\\/sign-?out|\\/log-?off|\\/endsession|\\/revoke/i.test(urlLower);
+          var bodyText = (body.innerText || body.textContent || '').substring(0, 5000);
+          var hasLogoutText = /logged out|signed out|session ended|goodbye|you have been logged out/i.test(bodyText);
+
+          if ((isLogoutURL || hasLogoutText) && url !== lastLogoutReportUrl) {
+            lastLogoutReportUrl = url;
+            window.inspector.reportCompliance('AUTH', 'LOGOUT_EVENT: Logout detected at ' + url, true, JSON.stringify({ url: url, matchedURL: isLogoutURL, matchedText: hasLogoutText, timestamp: new Date().toISOString() }));
+          }
+        } catch(e) {}
+      }
+
+      // ── Run on load and observe DOM changes ──
+      setTimeout(function() { scanForLoginUI(); scanForLogoutUI(); }, 2000);
+
+      try {
+        if (document.body) {
+          var loginObserver = new MutationObserver(function() {
+            scanForLoginUI();
+            scanForLogoutUI();
+          });
+          loginObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['type', 'class'] });
+        }
+      } catch(e) {}
+
+      // Also check on popstate (SPA navigation)
+      window.addEventListener('popstate', function() {
+        setTimeout(function() { scanForLoginUI(); scanForLogoutUI(); }, 1000);
+      });
+
+      var loginPushState = history.pushState;
+      history.pushState = function() { loginPushState.apply(this, arguments); window.__inspectorLoginInjected = false; };
+      var loginReplaceState = history.replaceState;
+      history.replaceState = function() { loginReplaceState.apply(this, arguments); window.__inspectorLoginInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector] Could not inject login/logout detector:', err.message);
+  });
+}
+
+// ──────────────────────────────────────────────
 // Inject axe-core Accessibility Scanner (Pillar 3)
 // ──────────────────────────────────────────────
 
@@ -1428,6 +1720,13 @@ function setupIPC() {
     }
     if (check.startsWith('JCI_IPSG1_VIOLATION')) {
       jciIpsg1Violations.push({ url: detailsObj.url || '', timestamp: entry.timestamp, identifiersFound: detailsObj.identifiersFound || 0, identifierTypes: detailsObj.identifierTypes || [] });
+    }
+    // ── Pillar 6: Route login/logout events ──
+    if (check.startsWith('LOGIN_EVENT')) {
+      loginEvents.push({ url: detailsObj.url || '', timestamp: entry.timestamp });
+    }
+    if (check.startsWith('LOGOUT_EVENT')) {
+      logoutEvents.push({ url: detailsObj.url || '', timestamp: entry.timestamp });
     }
 
     console.log(`[Inspector:Compliance] ${passed ? '\u2713' : '\u2717'} ${standard} \u2014 ${check}`);
@@ -1572,7 +1871,10 @@ function setupIPC() {
         sessionStartTime, process.versions.electron, TARGET_URL,
         // Pillar 5
         completedWorkflows, abandonedWorkflows, slowWorkflows,
-        navigationConfusion, concurrentPatientSessions
+        navigationConfusion, concurrentPatientSessions,
+        // Pillar 6
+        expiredTokenRequests, tokenExpiryWarnings, concurrentSessionAnomalies,
+        privilegeScopeExceeded, reauthenticationBypassed, loginEvents, logoutEvents
       );
       const filePath = aggregator.generateReport();
       return { success: true, filePath };
@@ -1620,6 +1922,33 @@ function setupIPC() {
     };
   });
 
+  // ── Session Integrity IPC (Pillar 6) ──
+
+  ipcMain.on('inspector:reportSessionEvent', (_event, { type, data }) => {
+    const entry = { ...data, timestamp: new Date().toISOString() };
+
+    if (type === 'login_detected') {
+      loginEvents.push(entry);
+      console.log(`[Inspector:Session] ✓ Login detected at ${data.url}`);
+    }
+    if (type === 'logout_detected') {
+      logoutEvents.push(entry);
+      console.log(`[Inspector:Session] ✓ Logout detected at ${data.url}`);
+    }
+  });
+
+  ipcMain.handle('inspector:getSessionCounts', async () => {
+    return {
+      expiredTokenRequests: expiredTokenRequests.length,
+      tokenExpiryWarnings: tokenExpiryWarnings.length,
+      concurrentSessionAnomalies: concurrentSessionAnomalies.length,
+      privilegeScopeExceeded: privilegeScopeExceeded.length,
+      reauthenticationBypassed: reauthenticationBypassed.length,
+      loginEvents: loginEvents.length,
+      logoutEvents: logoutEvents.length,
+    };
+  });
+
   ipcMain.handle('inspector:getSummaryScores', async () => {
     const complianceScore = _computeComplianceScore();
     const uxScore = _computeUXScore();
@@ -1646,6 +1975,11 @@ function _computeComplianceScore() {
   score -= phiUnencryptedTransmissions.length * 30;
   score -= autoLogoffViolations.length * 20;
   score -= concurrentPatientSessions.length * 20;
+  // Pillar 6 deductions
+  score -= expiredTokenRequests.length * 30;
+  score -= concurrentSessionAnomalies.length * 40;
+  score -= privilegeScopeExceeded.length * 35;
+  score -= reauthenticationBypassed.length * 50;
   return Math.max(0, Math.min(100, score));
 }
 
@@ -1711,6 +2045,8 @@ app.whenReady().then(() => {
     injectAxeScanner();
     // Pillar 5
     injectWorkflowIntelligence();
+    // Pillar 6
+    injectLoginLogoutDetector();
   });
 
   app.on('activate', () => {
