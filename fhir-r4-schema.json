@@ -1,0 +1,264 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Inspector FHIR R4 Base Schema — validates core FHIR resource structure, resourceType, id, meta, and common patterns across all R4 resource types.",
+  "type": "object",
+  "required": ["resourceType"],
+  "properties": {
+    "resourceType": {
+      "type": "string",
+      "enum": [
+        "Account","ActivityDefinition","AdverseEvent","AllergyIntolerance","Appointment",
+        "AppointmentResponse","AuditEvent","Basic","Binary","BiologicallyDerivedProduct",
+        "BodyStructure","Bundle","CapabilityStatement","CarePlan","CareTeam",
+        "CatalogEntry","ChargeItem","ChargeItemDefinition","Claim","ClaimResponse",
+        "ClinicalImpression","CodeSystem","Communication","CommunicationRequest",
+        "CompartmentDefinition","Composition","ConceptMap","Condition","Consent",
+        "Contract","Coverage","CoverageEligibilityRequest","CoverageEligibilityResponse",
+        "DetectedIssue","Device","DeviceDefinition","DeviceMetric","DeviceRequest",
+        "DeviceUseStatement","DiagnosticReport","DocumentManifest","DocumentReference",
+        "EffectEvidenceSynthesis","Encounter","Endpoint","EnrollmentRequest",
+        "EnrollmentResponse","EpisodeOfCare","EventDefinition","Evidence","EvidenceVariable",
+        "ExampleScenario","ExplanationOfBenefit","FamilyMemberHistory","Flag","Goal",
+        "GraphDefinition","Group","GuidanceResponse","HealthcareService","ImagingStudy",
+        "Immunization","ImmunizationEvaluation","ImmunizationRecommendation",
+        "ImplementationGuide","InsurancePlan","Invoice","Library","Linkage","List",
+        "Location","Measure","MeasureReport","Media","Medication","MedicationAdministration",
+        "MedicationDispense","MedicationKnowledge","MedicationRequest","MedicationStatement",
+        "MedicinalProduct","MedicinalProductAuthorization","MedicinalProductContraindication",
+        "MedicinalProductIndication","MedicinalProductIngredient","MedicinalProductOperation",
+        "MedicinalProductPackaged","MedicinalProductPharmaceutical","MedicinalProductUndesirableEffect",
+        "MessageDefinition","MessageHeader","MolecularSequence","NamingSystem","NutritionOrder",
+        "Observation","ObservationDefinition","OperationDefinition","OperationOutcome",
+        "Organization","OrganizationAffiliation","Parameters","Patient","PaymentNotice",
+        "PaymentReconciliation","Person","PlanDefinition","Practitioner","PractitionerRole",
+        "Procedure","Provenance","Questionnaire","QuestionnaireResponse","RelatedPerson",
+        "RequestGroup","ResearchDefinition","ResearchElementDefinition","ResearchStudy",
+        "ResearchSubject","RiskAssessment","RiskEvidenceSynthesis","Schedule","SearchParameter",
+        "ServiceRequest","Slot","Specimen","SpecimenDefinition","StructureDefinition",
+        "StructureMap","Subscription","Substance","SubstanceNucleicAcid","SubstancePolymer",
+        "SubstanceProtein","SubstanceReferenceInformation","SubstanceSourceMaterial",
+        "SubstanceSpecification","SupplyDelivery","SupplyRequest","Task","TerminologyCapabilities",
+        "TestReport","TestScript","ValueSet","VerificationResult","VisionPrescription"
+      ],
+      "errorMessage": "Invalid or missing FHIR R4 resourceType"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9\\-\\.]{1,64}$",
+      "errorMessage": "FHIR id must be 1-64 chars: letters, digits, hyphens, dots"
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "versionId": { "type": "string" },
+        "lastUpdated": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+          "errorMessage": "FHIR lastUpdated must be a valid ISO 8601 date-time"
+        },
+        "source": { "type": "string", "pattern": "^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "profile": { "type": "array", "items": { "type": "string" } },
+        "tag": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "system": { "type": "string" },
+              "code": { "type": "string" },
+              "display": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "implicitRules": { "type": "string", "format": "uri" },
+    "language": {
+      "type": "string",
+      "pattern": "^(urn:ietf:bcp:47:[A-Za-z]{2}(-[A-Za-z0-9]+)*|[A-Za-z]{2})$"
+    },
+    "text": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["generated","extensions","additional","empty"]
+        },
+        "div": { "type": "string" }
+      }
+    },
+    "identifier": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "use": { "type": "string", "enum": ["usual","official","temp","secondary","old"] },
+          "type": { "type": "object" },
+          "system": { "type": "string", "format": "uri" },
+          "value": { "type": "string" },
+          "period": { "type": "object" },
+          "assigner": { "type": "object" }
+        }
+      }
+    },
+    "active": { "type": "boolean" },
+    "extension": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "valueString": { "type": "string" },
+          "valueCode": { "type": "string" },
+          "valueBoolean": { "type": "boolean" },
+          "valueInteger": { "type": "integer" },
+          "valueDecimal": { "type": "number" },
+          "valueDateTime": { "type": "string" },
+          "valueReference": { "type": "object" },
+          "valueCoding": { "type": "object" },
+          "valueCodeableConcept": { "type": "object" },
+          "valuePeriod": { "type": "object" },
+          "valueQuantity": { "type": "object" },
+          "valueIdentifier": { "type": "object" },
+          "valueHumanName": { "type": "object" },
+          "valueAddress": { "type": "object" },
+          "valueContactPoint": { "type": "object" },
+          "valueAnnotation": { "type": "object" },
+          "valueAttachment": { "type": "object" },
+          "valueRatio": { "type": "object" },
+          "valueRange": { "type": "object" },
+          "valueSampledData": { "type": "object" },
+          "valueSignature": { "type": "object" },
+          "valueTiming": { "type": "object" },
+          "valueMeta": { "type": "object" },
+          "extension": { "$ref": "#/properties/extension" }
+        }
+      }
+    },
+    "modifierExtension": {
+      "type": "array",
+      "items": { "$ref": "#/properties/extension/items" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "resourceType": { "const": "Patient" } } },
+      "then": {
+        "properties": {
+          "name": { "type": "array" },
+          "telecom": { "type": "array" },
+          "gender": { "type": "string", "enum": ["male","female","other","unknown"] },
+          "birthDate": { "type": "string" },
+          "address": { "type": "array" },
+          "maritalStatus": { "type": "object" },
+          "generalPractitioner": { "type": "array" },
+          "managingOrganization": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "Observation" } } },
+      "then": {
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["registered","preliminary","final","amended","corrected","cancelled","entered-in-error","unknown"] },
+          "code": { "type": "object" },
+          "subject": { "type": "object" },
+          "effectiveDateTime": { "type": "string" },
+          "valueQuantity": { "type": "object" },
+          "valueString": { "type": "string" },
+          "valueCodeableConcept": { "type": "object" },
+          "referenceRange": { "type": "array" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "Bundle" } } },
+      "then": {
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "enum": ["document","message","transaction","transaction-response","batch","batch-response","history","searchset","collection"] },
+          "total": { "type": "integer", "minimum": 0 },
+          "entry": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fullUrl": { "type": "string", "format": "uri" },
+                "resource": { "type": "object" },
+                "request": { "type": "object" },
+                "response": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "Encounter" } } },
+      "then": {
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string" },
+          "class": { "type": "object" },
+          "subject": { "type": "object" },
+          "period": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "Condition" } } },
+      "then": {
+        "properties": {
+          "subject": { "type": "object" },
+          "code": { "type": "object" },
+          "clinicalStatus": { "type": "object" },
+          "verificationStatus": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "MedicationRequest" } } },
+      "then": {
+        "required": ["status","intent","subject","medicationCodeableConcept"],
+        "properties": {
+          "status": { "type": "string", "enum": ["active","on-hold","cancelled","completed","entered-in-error","stopped","draft","unknown"] },
+          "intent": { "type": "string" },
+          "subject": { "type": "object" },
+          "medicationCodeableConcept": { "type": "object" },
+          "authoredOn": { "type": "string" },
+          "requester": { "type": "object" },
+          "dosageInstruction": { "type": "array" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "DiagnosticReport" } } },
+      "then": {
+        "required": ["status","code"],
+        "properties": {
+          "status": { "type": "string", "enum": ["registered","partial","preliminary","final","amended","corrected","appended","cancelled","entered-in-error","unknown"] },
+          "code": { "type": "object" },
+          "subject": { "type": "object" },
+          "effectiveDateTime": { "type": "string" },
+          "issued": { "type": "string" },
+          "result": { "type": "array" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "resourceType": { "const": "Procedure" } } },
+      "then": {
+        "required": ["status","code"],
+        "properties": {
+          "status": { "type": "string", "enum": ["preparation","in-progress","not-done","on-hold","stopped","completed","entered-in-error","unknown"] },
+          "code": { "type": "object" },
+          "subject": { "type": "object" },
+          "performedDateTime": { "type": "string" },
+          "performer": { "type": "array" }
+        }
+      }
+    }
+  ]
+}

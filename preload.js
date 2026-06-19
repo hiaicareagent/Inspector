@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('inspector', {
     ipcRenderer.send('inspector:reportMetric', { tag, value, metadata });
   },
 
-  // ── Compliance (HIPAA, SOC2, etc.) ──
+  // ── Compliance (HIPAA, JCI, FHIR, SOC2, etc.) ──
   reportCompliance: (standard, check, passed, details) => {
     ipcRenderer.send('inspector:reportCompliance', { standard, check, passed, details });
   },
@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('inspector', {
     ipcRenderer.send('inspector:reportError', { source, message, stack });
   },
 
+  // ── Clinician Interaction Timestamp (Pillar 2 — Auto-Logoff) ──
+  reportInteraction: (timestamp) => {
+    ipcRenderer.send('inspector:reportInteraction', { timestamp });
+  },
+
   // ── Report Generation ──
   generateReport: () => {
     return ipcRenderer.invoke('inspector:generateReport');
@@ -31,7 +36,11 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getLogCounts');
   },
 
-  // ── Tracing Control ──
+  getComplianceCounts: () => {
+    return ipcRenderer.invoke('inspector:getComplianceCounts');
+  },
+
+  // ── Tracing Control (Pillar 1) ──
   startTrace: () => {
     return ipcRenderer.invoke('inspector:startTrace');
   },

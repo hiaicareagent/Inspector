@@ -7,11 +7,18 @@ class ReportAggregator {
    * @param {Array}  complianceLog
    * @param {Array}  uxLog
    * @param {Array}  errorLog
-   * @param {Object} coreWebVitals  - { FCP: {value,timestamp,url}, LCP: {...}, CLS: {...} }
-   * @param {Array}  longTasks      - [ { duration, triggerElement, timestamp, currentURL }, ... ]
-   * @param {Array}  memorySnapshots - [ { timestamp, processes: [...] }, ... ]
+   * @param {Object} coreWebVitals
+   * @param {Array}  longTasks
+   * @param {Array}  memorySnapshots
    * @param {string|null} traceFilePath
    * @param {string} reportsDir
+   * @param {Array}  fhirViolations         — [ { url, timestamp, errorType, errorDetails }, ... ]
+   * @param {Array}  phiStorageFlags        — [ { key, pattern, store, timestamp }, ... ]
+   * @param {Array}  phiUnencryptedTransmissions  — [ { url, timestamp }, ... ]
+   * @param {Array}  jciViolations          — [ { url, timestamp, identifiersFound, identifierTypes }, ... ]
+   * @param {Array}  autoLogoffViolations   — [ { systemIdleSeconds, effectiveInactiveMs, timestamp }, ... ]
+   * @param {number} longestInactivity      — ms
+   * @param {number} autoLogoffTimeoutMs    — configured timeout in ms
    */
   constructor(
     metricsLog,
@@ -22,7 +29,14 @@ class ReportAggregator {
     longTasks,
     memorySnapshots,
     traceFilePath,
-    reportsDir
+    reportsDir,
+    fhirViolations,
+    phiStorageFlags,
+    phiUnencryptedTransmissions,
+    jciViolations,
+    autoLogoffViolations,
+    longestInactivity,
+    autoLogoffTimeoutMs
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -33,6 +47,15 @@ class ReportAggregator {
     this.memorySnapshots = memorySnapshots || [];
     this.traceFilePath = traceFilePath || null;
     this.reportsDir = reportsDir;
+
+    // Pillar 2 — Clinical Compliance
+    this.fhirViolations = fhirViolations || [];
+    this.phiStorageFlags = phiStorageFlags || [];
+    this.phiUnencryptedTransmissions = phiUnencryptedTransmissions || [];
+    this.jciViolations = jciViolations || [];
+    this.autoLogoffViolations = autoLogoffViolations || [];
+    this.longestInactivity = longestInactivity || 0;
+    this.autoLogoffTimeoutMs = autoLogoffTimeoutMs || 900000;
   }
 
   /**
@@ -121,6 +144,65 @@ class ReportAggregator {
         },
 
         traceFilePath: this.traceFilePath,
+      },
+
+      // ════════════════════════════════════════
+      //  Clinical Compliance Section (Pillar 2)
+      // ════════════════════════════════════════
+      clinicalCompliance: {
+        fhirValidation: {
+          totalViolations: this.fhirViolations.length,
+          violations: this.fhirViolations.slice(-100).map(v => ({
+            url: v.url,
+            timestamp: v.timestamp,
+            errorType: v.errorType,
+            errorDetails: v.errorDetails,
+          })),
+          summary: this._summarizeFHIRViolations(),
+        },
+
+        phiStorageScan: {
+          totalFlags: this.phiStorageFlags.length,
+          flags: this.phiStorageFlags.slice(-100).map(f => ({
+            key: f.key,
+            pattern: f.pattern,
+            store: f.store,
+            timestamp: f.timestamp,
+          })),
+          byPattern: this._groupByPHIPattern(),
+          byStore: this._groupByPHIStore(),
+        },
+
+        unencryptedTransmissions: {
+          total: this.phiUnencryptedTransmissions.length,
+          transmissions: this.phiUnencryptedTransmissions.slice(-100).map(t => ({
+            url: t.url,
+            timestamp: t.timestamp,
+            statusCode: t.statusCode,
+            resourceType: t.resourceType,
+          })),
+        },
+
+        jciIpsg1: {
+          totalViolations: this.jciViolations.length,
+          violations: this.jciViolations.slice(-100).map(v => ({
+            url: v.url,
+            timestamp: v.timestamp,
+            identifiersFound: v.identifiersFound,
+            identifierTypes: v.identifierTypes,
+          })),
+        },
+
+        autoLogoffAudit: {
+          limitMinutes: this.autoLogoffTimeoutMs / 60000,
+          totalViolations: this.autoLogoffViolations.length,
+          longestInactivityMinutes: Math.round(this.longestInactivity / 60000),
+          violations: this.autoLogoffViolations.slice(-50).map(v => ({
+            systemIdleSeconds: v.systemIdleSeconds,
+            effectiveInactiveMinutes: Math.round(v.effectiveInactiveMs / 60000),
+            timestamp: v.timestamp,
+          })),
+        },
       },
     };
 
@@ -240,6 +322,40 @@ class ReportAggregator {
     const groups = {};
     for (const e of this.errors) {
       groups[e.source] = (groups[e.source] || 0) + 1;
+    }
+    return groups;
+  }
+
+  // ── FHIR-specific helpers ──
+
+  _summarizeFHIRViolations() {
+    if (this.fhirViolations.length === 0) return { status: 'no_violations' };
+
+    const byType = {};
+    for (const v of this.fhirViolations) {
+      const t = v.errorType || 'UNKNOWN';
+      if (!byType[t]) byType[t] = 0;
+      byType[t]++;
+    }
+    return { byErrorType: byType };
+  }
+
+  _groupByPHIPattern() {
+    const groups = {};
+    for (const f of this.phiStorageFlags) {
+      const p = f.pattern || 'UNKNOWN';
+      if (!groups[p]) groups[p] = 0;
+      groups[p]++;
+    }
+    return groups;
+  }
+
+  _groupByPHIStore() {
+    const groups = {};
+    for (const f of this.phiStorageFlags) {
+      const s = f.store || 'UNKNOWN';
+      if (!groups[s]) groups[s] = 0;
+      groups[s]++;
     }
     return groups;
   }
