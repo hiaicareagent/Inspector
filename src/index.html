@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-src *; connect-src *; img-src * data:; font-src *;">
   <title>Inspector Browser</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -312,6 +312,144 @@
           <div class="advisor-loading" id="advisor-loading" style="display:none">
             <div class="loading-spinner" style="width:20px;height:20px;border-width:2px;"></div>
             <span style="color:var(--text-muted);font-size:12px">Running checks...</span>
+          </div>
+        </div>
+
+        <!-- UX Advisor Panel -->
+        <div class="monitor-panel-content" id="panel-ux">
+          <div class="advisor-welcome">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity="0.3"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+            <p>Select UX categories below and audit the page for usability, accessibility, and user experience issues.</p>
+          </div>
+
+          <div class="advisor-categories" id="ux-categories">
+            <button class="advisor-cat-btn" data-category="navigation" data-selected="true">
+              <span class="advisor-cat-icon">🧭</span>
+              <span class="advisor-cat-name">Navigation</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="forms" data-selected="true">
+              <span class="advisor-cat-icon">📝</span>
+              <span class="advisor-cat-name">Forms & Input</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="visual" data-selected="true">
+              <span class="advisor-cat-icon">🎨</span>
+              <span class="advisor-cat-name">Visual Consistency</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="content" data-selected="true">
+              <span class="advisor-cat-icon">📖</span>
+              <span class="advisor-cat-name">Content & Readability</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="feedback" data-selected="true">
+              <span class="advisor-cat-icon">💬</span>
+              <span class="advisor-cat-name">Feedback & Responsiveness</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="mobile" data-selected="true">
+              <span class="advisor-cat-icon">📱</span>
+              <span class="advisor-cat-name">Mobile & Touch</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="search" data-selected="true">
+              <span class="advisor-cat-icon">🔍</span>
+              <span class="advisor-cat-name">Search & Findability</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="a11y-ux" data-selected="true">
+              <span class="advisor-cat-icon">♿</span>
+              <span class="advisor-cat-name">Accessibility Basics</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+          </div>
+
+          <div class="advisor-actions">
+            <button class="advisor-btn" id="ux-run-all">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              Run UX Audit
+            </button>
+            <button class="advisor-btn advisor-btn-secondary" id="ux-select-all">Select All</button>
+            <button class="advisor-btn advisor-btn-secondary" id="ux-deselect-all">Deselect All</button>
+          </div>
+
+          <div class="advisor-results" id="ux-results" style="display:none">
+            <div class="advisor-summary" id="ux-summary"></div>
+            <div class="advisor-issues" id="ux-issues"></div>
+          </div>
+          <div class="advisor-loading" id="ux-loading" style="display:none">
+            <div class="loading-spinner" style="width:20px;height:20px;border-width:2px;"></div>
+            <span style="color:var(--text-muted);font-size:12px">Running UX audit...</span>
+          </div>
+        </div>
+
+        <!-- Performance Audit Advisor Panel -->
+        <div class="monitor-panel-content" id="panel-perf-audit">
+          <div class="advisor-welcome">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity="0.3"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+            <p>Select performance categories below and audit the page for load time, optimization opportunities, and resource usage.</p>
+          </div>
+
+          <div class="advisor-categories" id="perf-categories">
+            <button class="advisor-cat-btn" data-category="load" data-selected="true">
+              <span class="advisor-cat-icon">⏱</span>
+              <span class="advisor-cat-name">Page Load</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="resources" data-selected="true">
+              <span class="advisor-cat-icon">📦</span>
+              <span class="advisor-cat-name">Resources</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="rendering" data-selected="true">
+              <span class="advisor-cat-icon">🖼️</span>
+              <span class="advisor-cat-name">Rendering</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="js-exec" data-selected="true">
+              <span class="advisor-cat-icon">⚡</span>
+              <span class="advisor-cat-name">JavaScript Execution</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="network" data-selected="true">
+              <span class="advisor-cat-icon">🌐</span>
+              <span class="advisor-cat-name">Network</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="caching" data-selected="true">
+              <span class="advisor-cat-icon">💾</span>
+              <span class="advisor-cat-name">Caching</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="dom" data-selected="true">
+              <span class="advisor-cat-icon">📐</span>
+              <span class="advisor-cat-name">DOM Efficiency</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+            <button class="advisor-cat-btn" data-category="best-practices" data-selected="true">
+              <span class="advisor-cat-icon">✅</span>
+              <span class="advisor-cat-name">Best Practices</span>
+              <span class="advisor-cat-check">✓</span>
+            </button>
+          </div>
+
+          <div class="advisor-actions">
+            <button class="advisor-btn" id="perf-run-all">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              Run Performance Audit
+            </button>
+            <button class="advisor-btn advisor-btn-secondary" id="perf-select-all">Select All</button>
+            <button class="advisor-btn advisor-btn-secondary" id="perf-deselect-all">Deselect All</button>
+          </div>
+
+          <div class="advisor-results" id="perf-results" style="display:none">
+            <div class="advisor-summary" id="perf-summary"></div>
+            <div class="advisor-issues" id="perf-issues"></div>
+          </div>
+          <div class="advisor-loading" id="perf-loading" style="display:none">
+            <div class="loading-spinner" style="width:20px;height:20px;border-width:2px;"></div>
+            <span style="color:var(--text-muted);font-size:12px">Running performance audit...</span>
           </div>
         </div>
 
