@@ -31,13 +31,22 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getLogCounts');
   },
 
+  // ── Tracing Control ──
+  startTrace: () => {
+    return ipcRenderer.invoke('inspector:startTrace');
+  },
+
+  stopTrace: () => {
+    return ipcRenderer.invoke('inspector:stopTrace');
+  },
+
+  getTraceStatus: () => {
+    return ipcRenderer.invoke('inspector:getTraceStatus');
+  },
+
   // ── Event listeners ──
   onReady: (callback) => {
     ipcRenderer.on('inspector:ready', (_event, data) => callback(data));
-  },
-
-  onMetricReported: (callback) => {
-    ipcRenderer.on('inspector:metricReported', (_event, data) => callback(data));
   },
 
   // ── Window controls (frameless) ──

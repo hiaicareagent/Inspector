@@ -21,16 +21,20 @@
       "package.json"
     ],
     "win": {
-      "target": [{
-        "target": "portable",
-        "arch": ["x64"]
-      }],
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Inspector-Healthcare-${version}-portable.exe"
     }
   },
   "dependencies": {
-    "axe-core": "^4.10.0",
-    "ajv": "^8.17.1"
+    "ajv": "^8.17.1",
+    "axe-core": "^4.10.0"
   },
   "devDependencies": {
     "electron": "^33.4.11",

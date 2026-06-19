@@ -3,17 +3,35 @@ const path = require('path');
 
 class ReportAggregator {
   /**
-   * @param {Array} metricsLog   - Array of { tag, value, metadata, timestamp }
-   * @param {Array} complianceLog - Array of { standard, check, passed, details, timestamp }
-   * @param {Array} uxLog         - Array of { category, score, element, note, timestamp }
-   * @param {Array} errorLog      - Array of { source, message, stack, timestamp }
-   * @param {string} reportsDir   - Path to the /reports output directory
+   * @param {Array}  metricsLog
+   * @param {Array}  complianceLog
+   * @param {Array}  uxLog
+   * @param {Array}  errorLog
+   * @param {Object} coreWebVitals  - { FCP: {value,timestamp,url}, LCP: {...}, CLS: {...} }
+   * @param {Array}  longTasks      - [ { duration, triggerElement, timestamp, currentURL }, ... ]
+   * @param {Array}  memorySnapshots - [ { timestamp, processes: [...] }, ... ]
+   * @param {string|null} traceFilePath
+   * @param {string} reportsDir
    */
-  constructor(metricsLog, complianceLog, uxLog, errorLog, reportsDir) {
+  constructor(
+    metricsLog,
+    complianceLog,
+    uxLog,
+    errorLog,
+    coreWebVitals,
+    longTasks,
+    memorySnapshots,
+    traceFilePath,
+    reportsDir
+  ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
     this.ux = uxLog;
     this.errors = errorLog;
+    this.coreWebVitals = coreWebVitals || {};
+    this.longTasks = longTasks || [];
+    this.memorySnapshots = memorySnapshots || [];
+    this.traceFilePath = traceFilePath || null;
     this.reportsDir = reportsDir;
   }
 
@@ -42,7 +60,7 @@ class ReportAggregator {
 
       metrics: {
         summary: this._summarizeMetrics(),
-        log: this.metrics.slice(-500), // last 500 entries
+        log: this.metrics.slice(-500),
       },
 
       compliance: {
@@ -62,6 +80,48 @@ class ReportAggregator {
         bySource: this._groupByErrorSource(),
         log: this.errors.slice(-200),
       },
+
+      // ════════════════════════════════════════
+      //  Performance Section (Pillar 1)
+      // ════════════════════════════════════════
+      performance: {
+        coreWebVitals: {
+          FCP: this.coreWebVitals.FCP || null,
+          LCP: this.coreWebVitals.LCP || null,
+          CLS: this.coreWebVitals.CLS || null,
+        },
+
+        longTasks: {
+          total: this.longTasks.length,
+          tasks: this.longTasks.slice(-100).map(t => ({
+            duration: t.duration,
+            triggerElement: t.triggerElement || null,
+            timestamp: t.timestamp,
+            url: t.currentURL || '',
+          })),
+        },
+
+        memorySnapshots: {
+          totalSnapshots: this.memorySnapshots.length,
+          leakWarnings: this._countLeakWarnings(),
+          latestSnapshot: this.memorySnapshots.length > 0
+            ? this.memorySnapshots[this.memorySnapshots.length - 1]
+            : null,
+          snapshots: this.memorySnapshots.slice(-50).map(s => ({
+            timestamp: s.timestamp,
+            processes: s.processes.map(p => ({
+              type: p.processType,
+              pid: p.pid,
+              privateMemoryMB: p.privateMemory,
+              workingSetMB: p.workingSet,
+              cpuPercent: p.cpuPercent,
+              flag: p.flag,
+            })),
+          })),
+        },
+
+        traceFilePath: this.traceFilePath,
+      },
     };
 
     const dir = this.reportsDir;
@@ -75,6 +135,16 @@ class ReportAggregator {
   }
 
   // ── Private helpers ──
+
+  _countLeakWarnings() {
+    let count = 0;
+    for (const snap of this.memorySnapshots) {
+      for (const proc of snap.processes) {
+        if (proc.flag === 'MEMORY_LEAK_WARNING') count++;
+      }
+    }
+    return count;
+  }
 
   _summarizeMetrics() {
     if (this.metrics.length === 0) return { status: 'no_data' };
