@@ -47,7 +47,8 @@ class ReportAggregator {
     staleDataFlags, valueNotRendered, valueTruncated,
     allergyAlertNotVisible, formPrepopulationMismatches,
     networkConditionTests, offlineWarningMissing, reconnectionSyncFailures,
-    serviceWorkerAudit, criticalCacheMissing, degradedModeFreezes
+    serviceWorkerAudit, criticalCacheMissing, degradedModeFreezes,
+    scoreRegressions, newCriticalIssues, persistentDegradations
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -118,6 +119,11 @@ class ReportAggregator {
     this.serviceWorkerAudit = serviceWorkerAudit || [];
     this.criticalCacheMissing = criticalCacheMissing || [];
     this.degradedModeFreezes = degradedModeFreezes || [];
+
+    // Pillar 10 — Longitudinal Trends
+    this.scoreRegressions = scoreRegressions || [];
+    this.newCriticalIssues = newCriticalIssues || [];
+    this.persistentDegradations = persistentDegradations || [];
   }
 
   /** ─── Compute Scores ─── */
@@ -259,6 +265,108 @@ class ReportAggregator {
       seen.add(key);
       return true;
     }).slice(0, 50);
+  }
+
+  /** ─── Cluster points within 40px radius (for heatmap) ─── */
+  _clusterPoints(points) {
+    const clusters = [];
+    for (const p of points) {
+      let added = false;
+      for (const c of clusters) {
+        const dx = c.x - p.x;
+        const dy = c.y - p.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= 40) {
+          c.count++;
+          if (p.element) c.topElement = p.element;
+          if (p.session) c.sessions.push(p.session);
+          added = true;
+          break;
+        }
+      }
+      if (!added) {
+        clusters.push({ x: p.x, y: p.y, count: 1, topElement: p.element || null, sessions: p.session ? [p.session] : [] });
+      }
+    }
+    return clusters.sort((a, b) => b.count - a.count);
+  }
+
+  /** ─── Generate heatmap data file ─── */
+  generateHeatmapData() {
+    const rageClickPoints = (this.rageClicks || []).map(c => ({ x: c.x || 0, y: c.y || 0, element: c.element ? (c.element.tag || c.element.id || '') : '', session: this.sessionStartTime }));
+    const deadClickPoints = (this.deadClicks || []).map(c => ({ x: (c.element && c.element.x) || 0, y: (c.element && c.element.y) || 0, element: c.element ? (c.element.tag || c.element.id || '') : '', session: this.sessionStartTime }));
+
+    const now = new Date();
+    const ts = now.toISOString().replace(/[:.]/g, '-');
+    const heatmapPath = path.join(this.reportsDir, `heatmap-${ts}.json`);
+
+    const heatmapData = {
+      rageClickClusters: this._clusterPoints(rageClickPoints),
+      deadClickClusters: this._clusterPoints(deadClickPoints),
+      generatedAt: now.toISOString(),
+    };
+
+    try {
+      fs.writeFileSync(heatmapPath, JSON.stringify(heatmapData, null, 2), 'utf-8');
+      console.log(`[ReportAggregator] Heatmap data saved: ${heatmapPath}`);
+      return heatmapPath;
+    } catch (e) {
+      console.warn('[ReportAggregator] Could not save heatmap:', e.message);
+      return null;
+    }
+  }
+
+  /** ─── Generate trend data file (score history chart data) ─── */
+  generateTrendData() {
+    const now = new Date();
+    const ts = now.toISOString().replace(/[:.]/g, '-');
+    const trendPath = path.join(this.reportsDir, `trends-${ts}.json`);
+
+    // Load previous sessions from index.json
+    let sessions = [];
+    try {
+      const indexPath = path.join(this.reportsDir, 'index.json');
+      if (fs.existsSync(indexPath)) {
+        const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+        sessions = index.reports.map(r => ({
+          date: r.generatedAt,
+          complianceScore: r.scores.compliance,
+          uxScore: r.scores.ux,
+          performanceScore: r.scores.performance,
+        }));
+      }
+    } catch (e) {}
+    // Add current session
+    sessions.push({ date: now.toISOString(), complianceScore: this._calcComplianceScore(), uxScore: this._calcUXScore(), performanceScore: this._calcPerformanceScore() });
+
+    const regressions = (this.scoreRegressions || []).map(r => ({
+      metric: r.metric, previousScore: r.previousScore, newScore: r.newScore, delta: r.delta, timestamp: r.timestamp,
+    }));
+
+    const degs = (this.persistentDegradations || []).map(d => ({
+      metric: d.metric, trend: d.trend, deltaFromBaseline: d.deltaFromBaseline, sessionsAnalysed: d.sessionsAnalysed, timestamp: d.timestamp,
+    }));
+
+    const newIssues = (this.newCriticalIssues || []).map(n => ({
+      type: n.type, message: n.message, timestamp: n.timestamp,
+    }));
+
+    const trendData = {
+      sessions: sessions,
+      regressions: regressions,
+      persistentDegradations: degs,
+      newCriticalIssues: newIssues,
+      generatedAt: now.toISOString(),
+    };
+
+    try {
+      fs.writeFileSync(trendPath, JSON.stringify(trendData, null, 2), 'utf-8');
+      console.log(`[ReportAggregator] Trend data saved: ${trendPath}`);
+      return trendPath;
+    } catch (e) {
+      console.warn('[ReportAggregator] Could not save trend data:', e.message);
+      return null;
+    }
   }
 
   /** ─── Generate Unified Report ─── */
@@ -770,6 +878,55 @@ class ReportAggregator {
       },
 
       // ════════════════════════════════════════
+      // Longitudinal Trends Section (Pillar 10)
+      // ════════════════════════════════════════
+      longitudinalTrends: {
+        sessionsAudited: (() => {
+          try {
+            const idxPath = path.join(this.reportsDir, 'index.json');
+            if (fs.existsSync(idxPath)) {
+              const idx = JSON.parse(fs.readFileSync(idxPath, 'utf-8'));
+              return (idx.reports || []).length;
+            }
+          } catch (e) {}
+          return 0;
+        })(),
+        scoreRegressions: {
+          total: this.scoreRegressions.length,
+          entries: this.scoreRegressions.slice(-50).map(r => ({
+            metric: r.metric, previousScore: r.previousScore, newScore: r.newScore,
+            delta: r.delta, timestamp: r.timestamp,
+          })),
+        },
+        newCriticalIssues: {
+          total: this.newCriticalIssues.length,
+          entries: this.newCriticalIssues.slice(-50).map(n => ({
+            type: n.type, message: n.message, timestamp: n.timestamp,
+          })),
+        },
+        persistentDegradations: {
+          total: this.persistentDegradations.length,
+          entries: this.persistentDegradations.slice(-50).map(d => ({
+            metric: d.metric, trend: d.trend,
+            deltaFromBaseline: d.deltaFromBaseline,
+            sessionsAnalysed: d.sessionsAnalysed, timestamp: d.timestamp,
+          })),
+        },
+        heatmapDataFile: (() => {
+          try {
+            const files = fs.readdirSync(this.reportsDir).filter(f => f.startsWith('heatmap-') && f.endsWith('.json'));
+            return files.length > 0 ? path.join(this.reportsDir, files[files.length - 1]) : null;
+          } catch (e) { return null; }
+        })(),
+        trendDataFile: (() => {
+          try {
+            const files = fs.readdirSync(this.reportsDir).filter(f => f.startsWith('trends-') && f.endsWith('.json'));
+            return files.length > 0 ? path.join(this.reportsDir, files[files.length - 1]) : null;
+          } catch (e) { return null; }
+        })(),
+      },
+
+      // ════════════════════════════════════════
       // Telemetry Section (Pillar 4)
       // ════════════════════════════════════════
       telemetry: {
@@ -805,6 +962,11 @@ class ReportAggregator {
 
     fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf-8');
     console.log(`[ReportAggregator] Unified report saved: ${filePath}`);
+
+    // ── Pillar 10: Generate derivative data files ──
+    const heatmapFile = this.generateHeatmapData();
+    const trendFile = this.generateTrendData();
+
     return filePath;
   }
 

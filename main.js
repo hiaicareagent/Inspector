@@ -136,6 +136,31 @@ const valueTruncated = [];
 const allergyAlertNotVisible = [];
 const formPrepopulationMismatches = [];
 
+// ── Longitudinal Trend stores (Pillar 10) ──
+const scoreRegressions = [];
+const newCriticalIssues = [];
+const persistentDegradations = [];
+
+function getReportIndex() {
+  const indexPath = path.join(REPORTS_DIR, 'index.json');
+  try {
+    if (fs.existsSync(indexPath)) {
+      return JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+    }
+  } catch (e) {}
+  return { reports: [] };
+}
+
+function saveReportIndex(index) {
+  const indexPath = path.join(REPORTS_DIR, 'index.json');
+  try {
+    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('[Inspector:Trends] Could not save index.json:', e.message);
+  }
+}
+
+
 // ── Offline / Resilience stores (Pillar 9) ──
 const networkConditionTests = [];
 const offlineWarningMissing = [];
@@ -2616,6 +2641,11 @@ function setupIPC() {
   ipcMain.handle('inspector:generateReport', async () => {
     try {
       const { ReportAggregator } = require('./reporting');
+
+      // ── Load report index for trend analysis (Pillar 10) ──
+      const index = getReportIndex();
+      const prevReport = index.reports.length > 0 ? index.reports[index.reports.length - 1] : null;
+
       const aggregator = new ReportAggregator(
         metricsLog, complianceLog, uxLog, errorLog,
         performanceCoreWebVitals, performanceLongTasks, performanceMemorySnapshots,
@@ -2639,6 +2669,102 @@ function setupIPC() {
         clinicalAPIErrors, silentFailures, thirdPartyDependencies
       );
       const filePath = aggregator.generateReport();
+
+      // ── Pillar 10: Save index entry with scores ──
+      const now = new Date();
+      const cScore = _computeComplianceScore();
+      const uScore = _computeUXScore();
+      const pScore = _computePerformanceScore();
+
+      const indexEntry = {
+        reportId: now.toISOString().replace(/[:.]/g, '-'),
+        generatedAt: now.toISOString(),
+        targetURL: TARGET_URL,
+        scores: { compliance: cScore, ux: uScore, performance: pScore },
+        totalIssues: (fhirViolations.length + phiStorageFlags.length + jciIpsg1Violations.length + autoLogoffViolations.length),
+        criticalFlags: curFlags.slice(0, 50),
+      };
+
+      // Extract current critical flags for comparison
+      var curFlags = [];
+      curFlags = curFlags.concat(fhirViolations.filter(function(v) { return v.errorType === 'INVALID_JSON' || v.errorType === 'MISSING_RESOURCE_TYPE'; }).map(function(v) { return v.errorType; }));
+      if (phiStorageFlags.length > 0) curFlags.push('PHI_IN_STORAGE');
+      if (phiUnencryptedTransmissions.length > 0) curFlags.push('PHI_UNENCRYPTED');
+      if (jciIpsg1Violations.length > 0) curFlags.push('JCI_IPSG1');
+      if (expiredTokenRequests.length > 0) curFlags.push('EXPIRED_TOKEN_REQUEST');
+      if (concurrentSessionAnomalies.length > 0) curFlags.push('CONCURRENT_SESSION_ANOMALY');
+      if (privilegeScopeExceeded.length > 0) curFlags.push('PRIVILEGE_SCOPE_EXCEEDED');
+      if (reauthenticationBypassed.length > 0) curFlags.push('REAUTHENTICATION_BYPASSED');
+      if (silentFailures.length > 0) curFlags.push('SILENT_FAILURE');
+      if (offlineWarningMissing.length > 0) curFlags.push('OFFLINE_WARNING_MISSING');
+      if (reconnectionSyncFailures.length > 0) curFlags.push('RECONNECTION_SYNC_FAILURE');
+
+      // Regression detection vs previous session
+      if (prevReport) {
+        [
+          { metric: 'compliance', prev: prevReport.scores.compliance, current: cScore },
+          { metric: 'ux', prev: prevReport.scores.ux, current: uScore },
+          { metric: 'performance', prev: prevReport.scores.performance, current: pScore }
+        ].forEach(function(s) {
+          if (s.prev !== undefined && s.current < s.prev - 10) {
+            var entry = { metric: s.metric, previousScore: s.prev, newScore: s.current, delta: s.current - s.prev, timestamp: now.toISOString() };
+            scoreRegressions.push(entry);
+            console.warn('[Inspector:Trends] \u26a0 SCORE_REGRESSION: ' + s.metric + ' dropped from ' + s.prev + ' to ' + s.current + ' (' + (s.current - s.prev) + ')');
+          }
+        });
+
+        // NEW_CRITICAL_ISSUE detection: compare flag types with previous report
+        var prevFlags = prevReport.criticalFlags || [];
+        if (prevFlags.length > 0) {
+          curFlags.forEach(function(flag) {
+            if (prevFlags.indexOf(flag) === -1) {
+              if (!newCriticalIssues.find(function(n) { return n.type === flag && Math.abs(new Date(n.timestamp) - now) < 30000; })) {
+                var entry = { type: flag, message: 'New critical issue type detected: ' + flag, firstSeenAt: now.toISOString(), timestamp: now.toISOString() };
+                newCriticalIssues.push(entry);
+                console.warn('[Inspector:Trends] \u26a0 NEW_CRITICAL_ISSUE: ' + flag + ' appeared in this session');
+              }
+            }
+          });
+        }
+
+        // Cross-session trend analysis (last 5 sessions)
+        var last5 = index.reports.slice(-5);
+        if (last5.length >= 3) {
+          [
+            { metric: 'compliance', key: 'compliance' },
+            { metric: 'UX', key: 'ux' },
+            { metric: 'performance', key: 'performance' }
+          ].forEach(function(m) {
+            var scores = last5.map(function(r) { return r.scores[m.key]; }).filter(function(s) { return s !== undefined; });
+            if (scores.length >= 3) {
+              var trend = 'stable';
+              var deltaFromBaseline = scores[scores.length - 1] - scores[0];
+
+              // Check if last 3 consecutive comparisons are all degrading
+              var lastThreeDegrading = true;
+              for (var ti = scores.length - 2; ti >= Math.max(0, scores.length - 3); ti--) {
+                if (scores[ti + 1] >= scores[ti] - 10) {
+                  lastThreeDegrading = false;
+                  break;
+                }
+              }
+
+              if (lastThreeDegrading && scores.length >= 3) {
+                trend = 'degrading';
+                var entry = { metric: m.metric, trend: 'degrading', deltaFromBaseline: deltaFromBaseline, sessionsAnalysed: scores.length, timestamp: now.toISOString() };
+                persistentDegradations.push(entry);
+                console.warn('[Inspector:Trends] \u26a0 PERSISTENT_DEGRADATION: ' + m.metric + ' degrading over last ' + scores.length + ' sessions (delta: ' + deltaFromBaseline + ')');
+              }
+            }
+          });
+        }
+      }
+
+      // Append to index
+      index.reports.push(indexEntry);
+      if (index.reports.length > 100) index.reports.splice(0, index.reports.length - 100);
+      saveReportIndex(index);
+
       return { success: true, filePath };
     } catch (err) {
       return { success: false, error: err.message };
@@ -2833,6 +2959,28 @@ function setupIPC() {
       serviceWorkerAudit: serviceWorkerAudit.length,
       criticalCacheMissing: criticalCacheMissing.length,
       degradedModeFreezes: degradedModeFreezes.length,
+    };
+  });
+
+  // ── Trend IPC (Pillar 10) ──
+
+  ipcMain.handle('inspector:getTrendCounts', async () => {
+    var index = getReportIndex();
+    var lastRegression = null;
+    if (scoreRegressions.length > 0) {
+      lastRegression = scoreRegressions[scoreRegressions.length - 1];
+    }
+    var lastDegradation = null;
+    if (persistentDegradations.length > 0) {
+      lastDegradation = persistentDegradations[persistentDegradations.length - 1];
+    }
+    return {
+      sessionsAudited: (index.reports || []).length,
+      scoreRegressions: scoreRegressions.length,
+      newCriticalIssues: newCriticalIssues.length,
+      persistentDegradations: persistentDegradations.length,
+      lastRegression: lastRegression ? lastRegression.metric + ': ' + lastRegression.previousScore + ' -> ' + lastRegression.newScore + ' (' + lastRegression.timestamp + ')' : null,
+      lastDegradation: lastDegradation ? lastDegradation.metric + ': ' + lastDegradation.trend + ' (delta: ' + lastDegradation.deltaFromBaseline + ')' : null,
     };
   });
 

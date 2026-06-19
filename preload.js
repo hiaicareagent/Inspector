@@ -211,6 +211,11 @@ contextBridge.exposeInMainWorld('inspector', {
     return true;
   })(),
 
+  // ── Trend Data (Pillar 10) ──
+  getTrendCounts: () => {
+    return ipcRenderer.invoke('inspector:getTrendCounts');
+  },
+
   // ── Window controls ──
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),

@@ -18,6 +18,17 @@
     .network-mode { font-size: 11px; color: var(--text-secondary); }
     .network-mode strong { color: var(--text-primary); }
     .network-stats { padding: 0 14px 8px; font-size: 10px; color: var(--text-muted); }
+    .trend-summary { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin: 8px 12px 0; padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .trend-indicators { display: flex; gap: 12px; }
+    .trend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+    .trend-label { color: var(--text-secondary); font-weight: 500; }
+    .trend-arrow { font-size: 14px; font-weight: 700; }
+    .trend-improving { color: var(--accent-green); }
+    .trend-degrading { color: var(--accent-red); }
+    .trend-stable { color: var(--accent-yellow); }
+    .trend-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .trend-meta-item { font-size: 10px; color: var(--text-muted); }
+    .trend-btn { font-size: 10px; padding: 3px 10px; }
   </style>
 </head>
 <body>
@@ -59,6 +70,29 @@
       <div class="score-card score-summary" id="score-overall">
         <div class="score-label">Overall</div>
         <div class="score-value" id="overall-score-value">—</div>
+      </div>
+    </div>
+
+    <!-- Trend Summary Panel (Pillar 10) -->
+    <div class="trend-summary" id="trend-summary">
+      <div class="trend-indicators">
+        <div class="trend-item" id="trend-compliance">
+          <span class="trend-label">Compliance</span>
+          <span class="trend-arrow trend-stable" id="trend-compliance-arrow">→</span>
+        </div>
+        <div class="trend-item" id="trend-ux">
+          <span class="trend-label">UX</span>
+          <span class="trend-arrow trend-stable" id="trend-ux-arrow">→</span>
+        </div>
+        <div class="trend-item" id="trend-perf">
+          <span class="trend-label">Perf</span>
+          <span class="trend-arrow trend-stable" id="trend-perf-arrow">→</span>
+        </div>
+      </div>
+      <div class="trend-meta">
+        <span class="trend-meta-item" id="trend-sessions">Sessions: 0</span>
+        <span class="trend-meta-item" id="trend-last-regression">Last Regression: —</span>
+        <button class="header-btn trend-btn" id="btn-view-trends" title="Open trend report JSON">View Trends</button>
       </div>
     </div>
 
@@ -342,6 +376,56 @@
       overlay.style.display = overlayVisible ? 'flex' : 'none';
     });
 
+    // ── Trend Data Update (Pillar 10) ──
+    function updateTrends() {
+      window.inspector.getTrendCounts().then(function(trends) {
+        document.getElementById('trend-sessions').textContent = 'Sessions: ' + trends.sessionsAudited;
+        document.getElementById('trend-last-regression').textContent = trends.lastRegression ? 'Last Regression: ' + trends.lastRegression.substring(0, 40) + '...' : 'Last Regression: —';
+
+        // Show trend direction from most recent degradation
+        if (trends.persistentDegradations > 0) {
+          ['compliance', 'ux', 'perf'].forEach(function(metric) {
+            // Use the degradation trend if available
+            if (metric === 'compliance' || metric === 'ux' || metric === 'perf') {
+              // Leave stable by default
+            }
+          });
+        }
+
+        // Score-based trend arrows from getSummaryScores polling
+        updateTrendArrows();
+      }).catch(function() {});
+    }
+
+    function updateTrendArrows() {
+      window.inspector.getSummaryScores().then(function(scores) {
+        var prev = window.__prevScores || { complianceScore: scores.complianceScore, uxScore: scores.uxScore, performanceScore: scores.performanceScore };
+        [
+          { id: 'trend-compliance-arrow', prev: prev.complianceScore, current: scores.complianceScore },
+          { id: 'trend-ux-arrow', prev: prev.uxScore, current: scores.uxScore },
+          { id: 'trend-perf-arrow', prev: prev.performanceScore, current: scores.performanceScore }
+        ].forEach(function(t) {
+          var el = document.getElementById(t.id);
+          if (!el) return;
+          var delta = t.current - t.prev;
+          if (delta > 5) { el.textContent = '↑'; el.className = 'trend-arrow trend-improving'; }
+          else if (delta < -5) { el.textContent = '↓'; el.className = 'trend-arrow trend-degrading'; }
+          else { el.textContent = '→'; el.className = 'trend-arrow trend-stable'; }
+        });
+        window.__prevScores = { complianceScore: scores.complianceScore, uxScore: scores.uxScore, performanceScore: scores.performanceScore };
+      }).catch(function() {});
+    }
+
+    // ── View Trends button ──
+    document.getElementById('btn-view-trends').addEventListener('click', function() {
+      // Generate a new report and open the trends file
+      window.inspector.generateReport().then(function(result) {
+        if (result.success) {
+          alert('Report generated. Trend data files are in the reports directory alongside:\\n' + result.filePath);
+        }
+      }).catch(function() {});
+    });
+
     // ── Network Simulation Controls ──
     document.querySelectorAll('.network-btn').forEach(function(btn) {
       btn.addEventListener('click', function() {
@@ -366,7 +450,7 @@
     setInterval(updateNetworkStats, 5000);
     // Also update on dashboard refresh
     var origUpdate = updateDashboard;
-    updateDashboard = function() { origUpdate(); updateNetworkStats(); };
+    updateDashboard = function() { origUpdate(); updateNetworkStats(); updateTrends(); };
 
     // Window controls
     document.addEventListener('keydown', (e) => {
