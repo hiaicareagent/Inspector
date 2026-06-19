@@ -1,70 +1,47 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('electronAPI', {
-  // Tab management
-  createTab: (url) => ipcRenderer.send('tab:create', url),
-  onTabCreated: (callback) => {
-    ipcRenderer.on('tab:created', (event, data) => callback(data));
-  },
-  navigateTab: (tabId, url) => ipcRenderer.send('tab:navigate', { tabId, url }),
-  goBack: (tabId) => ipcRenderer.send('tab:goBack', tabId),
-  goForward: (tabId) => ipcRenderer.send('tab:goForward', tabId),
-  reload: (tabId) => ipcRenderer.send('tab:reload', tabId),
-  stop: (tabId) => ipcRenderer.send('tab:stop', tabId),
-  closeTab: (tabId) => ipcRenderer.send('tab:close', tabId),
-  registerWebview: (tabId, webContentsId) => ipcRenderer.send('tab:registerWebview', { tabId, webContentsId }),
-
-  // Tab events
-  onTabUpdated: (callback) => {
-    ipcRenderer.on('tab:updated', (event, data) => callback(data));
-  },
-  onTabClosed: (callback) => {
-    ipcRenderer.on('tab:closed', (event, tabId) => callback(tabId));
+contextBridge.exposeInMainWorld('inspector', {
+  // ── Metrics ──
+  reportMetric: (tag, value, metadata) => {
+    ipcRenderer.send('inspector:reportMetric', { tag, value, metadata });
   },
 
-  // Monitoring data
-  onPerformanceData: (callback) => {
-    ipcRenderer.on('monitor:performance', (event, data) => callback(data));
-  },
-  onNetworkData: (callback) => {
-    ipcRenderer.on('monitor:network', (event, data) => callback(data));
-  },
-  onNetworkComplete: (callback) => {
-    ipcRenderer.on('monitor:networkComplete', (event, data) => callback(data));
-  },
-  onNetworkError: (callback) => {
-    ipcRenderer.on('monitor:networkError', (event, data) => callback(data));
-  },
-  onConsoleMessage: (callback) => {
-    ipcRenderer.on('monitor:console', (event, data) => callback(data));
+  // ── Compliance (HIPAA, SOC2, etc.) ──
+  reportCompliance: (standard, check, passed, details) => {
+    ipcRenderer.send('inspector:reportCompliance', { standard, check, passed, details });
   },
 
-  // Monitoring actions
-  getMonitoringData: (tabId) => ipcRenderer.send('monitor:getData', tabId),
-  onMonitoringData: (callback) => {
-    ipcRenderer.on('monitor:data', (event, data) => callback(data));
+  // ── UX / Usability ──
+  reportUX: (category, score, element, note) => {
+    ipcRenderer.send('inspector:reportUX', { category, score, element, note });
   },
-  runStyleAudit: (tabId) => ipcRenderer.invoke('monitor:styleAudit', tabId),
-  runSecurityScan: (tabId) => ipcRenderer.invoke('monitor:securityScan', tabId),
 
-  // HTML Advisor - comprehensive page audit
-  runHtmlAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:htmlAdvisor', { tabId, categories }),
-  runSecurityAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:securityAdvisor', { tabId, categories }),
-  runClinicalAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:clinicalAdvisor', { tabId, categories }),
-  runUxAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:uxAdvisor', { tabId, categories }),
-  runPerfAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:perfAdvisor', { tabId, categories }),
+  // ── Error Logging ──
+  reportError: (source, message, stack) => {
+    ipcRenderer.send('inspector:reportError', { source, message, stack });
+  },
 
-  // Report export
-  saveReport: (reportData) => ipcRenderer.invoke('export:saveReport', reportData),
+  // ── Report Generation ──
+  generateReport: () => {
+    return ipcRenderer.invoke('inspector:generateReport');
+  },
 
-  // Process metrics (live CPU, memory, heap)
-  getProcessInfo: () => ipcRenderer.invoke('metrics:getProcessInfo'),
+  // ── Live Status ──
+  getLogCounts: () => {
+    return ipcRenderer.invoke('inspector:getLogCounts');
+  },
 
-  // DevTools
-  openDevTools: (tabId) => ipcRenderer.send('devtools:open', tabId),
+  // ── Event listeners ──
+  onReady: (callback) => {
+    ipcRenderer.on('inspector:ready', (_event, data) => callback(data));
+  },
 
-  // Window controls
+  onMetricReported: (callback) => {
+    ipcRenderer.on('inspector:metricReported', (_event, data) => callback(data));
+  },
+
+  // ── Window controls (frameless) ──
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
-  closeWindow: () => ipcRenderer.send('window:close')
+  closeWindow: () => ipcRenderer.send('window:close'),
 });

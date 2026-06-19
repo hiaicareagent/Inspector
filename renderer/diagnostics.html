@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inspector — Diagnostics</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <svg class="header-icon" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+        </svg>
+        <span class="header-title">Inspector Diagnostics</span>
+      </div>
+      <div class="header-actions">
+        <button class="header-btn" id="btn-generate-report" title="Generate JSON report">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+          </svg>
+          Generate Report
+        </button>
+        <button class="header-btn" id="btn-toggle-overlay">Toggle Overlay</button>
+      </div>
+    </header>
+
+    <main class="main" id="main-content">
+      <!-- Metrics Section -->
+      <section class="section" id="section-metrics">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span class="section-icon">📊</span>
+            Performance Metrics
+          </h2>
+          <span class="section-count" id="metrics-count">0</span>
+        </div>
+        <div class="section-body" id="metrics-list">
+          <div class="empty-state">No metrics recorded yet.</div>
+        </div>
+      </section>
+
+      <!-- Compliance Section -->
+      <section class="section" id="section-compliance">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span class="section-icon">🛡️</span>
+            Compliance Checks
+          </h2>
+          <span class="section-count" id="compliance-count">0</span>
+        </div>
+        <div class="section-body">
+          <div class="compliance-summary" id="compliance-summary">
+            <div class="stat-card pass"><span class="stat-value" id="compliance-passed">0</span><span class="stat-label">Passed</span></div>
+            <div class="stat-card fail"><span class="stat-value" id="compliance-failed">0</span><span class="stat-label">Failed</span></div>
+            <div class="stat-card total"><span class="stat-value" id="compliance-rate">—</span><span class="stat-label">Pass Rate</span></div>
+          </div>
+          <div id="compliance-list">
+            <div class="empty-state">No compliance checks run yet.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- UX Section -->
+      <section class="section" id="section-ux">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span class="section-icon">🎨</span>
+            UX Audit
+          </h2>
+          <span class="section-count" id="ux-count">0</span>
+        </div>
+        <div class="section-body" id="ux-list">
+          <div class="empty-state">No UX data recorded yet.</div>
+        </div>
+      </section>
+
+      <!-- Error Section -->
+      <section class="section" id="section-errors">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span class="section-icon">❌</span>
+            Errors
+          </h2>
+          <span class="section-count error-badge" id="errors-count">0</span>
+        </div>
+        <div class="section-body" id="errors-list">
+          <div class="empty-state">No errors recorded.</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Status Overlay -->
+    <div class="overlay" id="overlay">
+      <div class="overlay-item" id="overlay-metrics">📊 0</div>
+      <div class="overlay-item" id="overlay-compliance">🛡️ 0</div>
+      <div class="overlay-item" id="overlay-ux">🎨 0</div>
+      <div class="overlay-item overlay-error" id="overlay-errors">❌ 0</div>
+    </div>
+  </div>
+
+  <script>
+    // ── Renderer Logic ──
+    const $ = (id) => document.getElementById(id);
+    const ESCAPE = (s) => {
+      if (!s) return '';
+      const d = document.createElement('div');
+      d.textContent = String(s);
+      return d.innerHTML;
+    };
+
+    function updateDashboard() {
+      window.inspector.getLogCounts().then((counts) => {
+        $('metrics-count').textContent = counts.metrics;
+        $('compliance-count').textContent = counts.compliance;
+        $('ux-count').textContent = counts.ux;
+        $('errors-count').textContent = counts.errors;
+
+        // Overlay badges
+        $('overlay-metrics').textContent = '📊 ' + counts.metrics;
+        $('overlay-compliance').textContent = '🛡️ ' + counts.compliance;
+        $('overlay-ux').textContent = '🎨 ' + counts.ux;
+        $('overlay-errors').textContent = '❌ ' + counts.errors;
+      });
+    }
+
+    // Listen for inspector:ready
+    window.inspector.onReady((data) => {
+      console.log('[Inspector Diagnostics] Ready. Reports dir:', data.reportsDir);
+      updateDashboard();
+    });
+
+    // Periodic poll (every 3s)
+    setInterval(updateDashboard, 3000);
+
+    // Generate Report
+    $('btn-generate-report').addEventListener('click', async () => {
+      const result = await window.inspector.generateReport();
+      if (result.success) {
+        alert('Report saved to: ' + result.filePath);
+      } else {
+        alert('Report generation failed: ' + result.error);
+      }
+    });
+
+    // Toggle overlay
+    let overlayVisible = true;
+    $('btn-toggle-overlay').addEventListener('click', () => {
+      overlayVisible = !overlayVisible;
+      $('overlay').style.display = overlayVisible ? 'flex' : 'none';
+    });
+
+    // Window controls (if frameless)
+    document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'q') {
+        window.inspector.closeWindow();
+      }
+    });
+  </script>
+</body>
+</html>
