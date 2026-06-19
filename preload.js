@@ -1,17 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('inspector', {
-  // ── Metrics ──
+  // ── Metrics (Pillar 1) ──
   reportMetric: (tag, value, metadata) => {
     ipcRenderer.send('inspector:reportMetric', { tag, value, metadata });
   },
 
-  // ── Compliance (HIPAA, JCI, FHIR, SOC2, etc.) ──
+  // ── Compliance (Pillar 2 — HIPAA, JCI, FHIR) ──
   reportCompliance: (standard, check, passed, details) => {
     ipcRenderer.send('inspector:reportCompliance', { standard, check, passed, details });
   },
 
-  // ── UX / Usability ──
+  // ── UX / Usability (Pillar 3 — Rage-clicks, dead-clicks, accessibility) ──
   reportUX: (category, score, element, note) => {
     ipcRenderer.send('inspector:reportUX', { category, score, element, note });
   },
@@ -21,9 +21,19 @@ contextBridge.exposeInMainWorld('inspector', {
     ipcRenderer.send('inspector:reportError', { source, message, stack });
   },
 
-  // ── Clinician Interaction Timestamp (Pillar 2 — Auto-Logoff) ──
+  // ── Interaction Timestamp (Pillar 2 — Auto-Logoff) ──
   reportInteraction: (timestamp) => {
     ipcRenderer.send('inspector:reportInteraction', { timestamp });
+  },
+
+  // ── Layout Shift (Pillar 3 — Screenshot capture) ──
+  reportLayoutShift: (shiftValue) => {
+    ipcRenderer.send('inspector:layoutShift', { shiftValue });
+  },
+
+  // ── Axe-core Results (Pillar 3 — Accessibility) ──
+  reportAxeResults: (results) => {
+    ipcRenderer.send('inspector:reportAxeResults', results);
   },
 
   // ── Report Generation ──
@@ -40,25 +50,21 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getComplianceCounts');
   },
 
+  getUXCounts: () => {
+    return ipcRenderer.invoke('inspector:getUXCounts');
+  },
+
   // ── Tracing Control (Pillar 1) ──
-  startTrace: () => {
-    return ipcRenderer.invoke('inspector:startTrace');
-  },
-
-  stopTrace: () => {
-    return ipcRenderer.invoke('inspector:stopTrace');
-  },
-
-  getTraceStatus: () => {
-    return ipcRenderer.invoke('inspector:getTraceStatus');
-  },
+  startTrace: () => ipcRenderer.invoke('inspector:startTrace'),
+  stopTrace: () => ipcRenderer.invoke('inspector:stopTrace'),
+  getTraceStatus: () => ipcRenderer.invoke('inspector:getTraceStatus'),
 
   // ── Event listeners ──
   onReady: (callback) => {
     ipcRenderer.on('inspector:ready', (_event, data) => callback(data));
   },
 
-  // ── Window controls (frameless) ──
+  // ── Window controls ──
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
   closeWindow: () => ipcRenderer.send('window:close'),

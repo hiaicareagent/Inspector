@@ -1,23 +1,34 @@
-const { app, BrowserWindow, ipcMain, contentTracing, powerMonitor, session } = require('electron');
+const { app, BrowserWindow, ipcMain, contentTracing, powerMonitor, session, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+
+// ── Pre-load axe-core source (read once, cache for injection) ──
+let axeCoreSource = '';
+try {
+  const axePath = require.resolve('axe-core/axe.min.js');
+  axeCoreSource = fs.readFileSync(axePath, 'utf-8');
+  console.log('[Inspector:Axe] axe-core loaded (' + (axeCoreSource.length / 1024).toFixed(0) + 'KB).');
+} catch (err) {
+  console.warn('[Inspector:Axe] axe-core not found. Run: npm install axe-core');
+}
 
 // ──────────────────────────────────────────────
 // Configuration
 // ──────────────────────────────────────────────
 
 const REPORTS_DIR = path.join(__dirname, 'reports');
+const SCREENSHOTS_DIR = path.join(REPORTS_DIR, 'screenshots');
 const FHIR_SCHEMA_PATH = path.join(__dirname, 'fhir-r4-schema.json');
 const TARGET_URL = process.env.INSPECTOR_TARGET_URL || 'https://example.com';
 const MEMORY_POLL_MS = 10000;
 const MEMORY_LEAK_THRESHOLD_MB = 500;
 const TRACE_AUTO_STOP_MS = 30000;
-const AUTOLOGOFF_TIMEOUT_MS = 15 * 60 * 1000;   // 15 minutes
-const IDLE_POLL_MS = 5000;                        // Check idle every 5s
-const STORAGE_SCAN_DELAY_MS = 1500;               // Delay after load for storage scan
+const AUTOLOGOFF_TIMEOUT_MS = 15 * 60 * 1000;
+const IDLE_POLL_MS = 5000;
+const STORAGE_SCAN_DELAY_MS = 1500;
 
 // ──────────────────────────────────────────────
-// Ensure /reports directory exists
+// Ensure directories exist
 // ──────────────────────────────────────────────
 
 function ensureReportsDir() {
@@ -25,10 +36,14 @@ function ensureReportsDir() {
     fs.mkdirSync(REPORTS_DIR, { recursive: true });
     console.log(`[Inspector] Created reports directory: ${REPORTS_DIR}`);
   }
+  if (!fs.existsSync(SCREENSHOTS_DIR)) {
+    fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+    console.log(`[Inspector] Created screenshots directory: ${SCREENSHOTS_DIR}`);
+  }
 }
 
 // ──────────────────────────────────────────────
-// Audit data store (per-scan accumulators)
+// Audit data store
 // ──────────────────────────────────────────────
 
 let mainWindow = null;
@@ -53,6 +68,21 @@ const autoLogoffViolations = [];
 let lastInteractionTimestamp = null;
 let longestInactivity = 0;
 
+// ── UX-specific stores (Pillar 3) ──
+const rageClicks = [];
+const deadClicks = [];
+const layoutShifts = [];
+const accessibilityAudit = {
+  score: null,
+  totalViolations: 0,
+  criticalViolations: [],
+  seriousViolations: [],
+  moderateViolations: [],
+};
+let previousScreenshotPath = null;
+let previousScreenshotHash = null;
+let lastLayoutShiftCapture = 0;
+
 // ── Tracing state ──
 let traceActive = false;
 let traceAutoStopTimer = null;
@@ -63,11 +93,10 @@ let memoryTimer = null;
 // ── Auto-logoff timer ──
 let idleTimer = null;
 
-// ── FHIR Schema (lazy-loaded) ──
+// ── FHIR Schema ──
 let fhirSchema = null;
 let ajvValidator = null;
 
-// ── FHIR resource type lowercase set for Content-Type fallback matching ──
 const FHIR_RESOURCE_TYPES = new Set([
   'patient','observation','bundle','encounter','condition','medicationrequest',
   'diagnosticreport','procedure','organization','practitioner','practitionerrole',
@@ -112,7 +141,7 @@ function createMainWindow() {
 }
 
 // ──────────────────────────────────────────────
-// FHIR R4 Schema Loading
+// FHIR R4 Schema Loading (Pillar 2)
 // ──────────────────────────────────────────────
 
 function loadFHIRSchema() {
@@ -124,7 +153,6 @@ function loadFHIRSchema() {
     const schemaData = fs.readFileSync(FHIR_SCHEMA_PATH, 'utf-8');
     fhirSchema = JSON.parse(schemaData);
 
-    // Dynamic import of ajv
     try {
       const Ajv = require('ajv');
       const ajv = new Ajv({
@@ -133,9 +161,8 @@ function loadFHIRSchema() {
         strict: false,
         validateSchema: false,
       });
-      // Register custom formats used in FHIR schema
-      ajv.addFormat('uri', true);           // Accept any string as uri
-      ajv.addFormat('date-time', true);     // Accept any string as date-time
+      ajv.addFormat('uri', true);
+      ajv.addFormat('date-time', true);
       const validate = ajv.compile(fhirSchema);
       ajvValidator = validate;
       console.log('[Inspector:FHIR] Schema loaded and compiled successfully.');
@@ -151,12 +178,6 @@ function loadFHIRSchema() {
   }
 }
 
-/**
- * Validate a JSON response body against FHIR R4 schema
- * @param {string} url
- * @param {string} bodyText - raw response body text
- * @returns {Array} violations found
- */
 function validateFHIRResource(url, bodyText) {
   const violations = [];
   let parsed;
@@ -172,7 +193,6 @@ function validateFHIRResource(url, bodyText) {
     return violations;
   }
 
-  // 1. Check resourceType exists
   if (!parsed.resourceType) {
     violations.push({
       url,
@@ -183,7 +203,6 @@ function validateFHIRResource(url, bodyText) {
     return violations;
   }
 
-  // 2. Check resourceType is valid FHIR R4
   if (!FHIR_RESOURCE_TYPES.has(parsed.resourceType.toLowerCase())) {
     violations.push({
       url,
@@ -193,7 +212,6 @@ function validateFHIRResource(url, bodyText) {
     });
   }
 
-  // 3. AJV schema validation (if available)
   if (ajvValidator) {
     const valid = ajvValidator(parsed);
     if (!valid && ajvValidator.errors) {
@@ -208,9 +226,8 @@ function validateFHIRResource(url, bodyText) {
     }
   }
 
-  // 4. Check id pattern
   if (parsed.id !== undefined && typeof parsed.id === 'string') {
-    if (!/^[A-Za-z0-9\-\.]{1,64}$/.test(parsed.id)) {
+    if (!/^[A-Za-z0-9\-\\.]{1,64}$/.test(parsed.id)) {
       violations.push({
         url,
         timestamp: new Date().toISOString(),
@@ -220,7 +237,6 @@ function validateFHIRResource(url, bodyText) {
     }
   }
 
-  // 5. Check meta.lastUpdated format
   if (parsed.meta && parsed.meta.lastUpdated) {
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(parsed.meta.lastUpdated)) {
       violations.push({
@@ -298,9 +314,7 @@ async function stopTrace() {
 
 function startMemoryMonitoring() {
   if (memoryTimer) return;
-
   sampleMemory();
-
   memoryTimer = setInterval(sampleMemory, MEMORY_POLL_MS);
 }
 
@@ -314,10 +328,7 @@ function stopMemoryMonitoring() {
 function sampleMemory() {
   try {
     const metrics = app.getAppMetrics();
-    const snapshot = {
-      timestamp: new Date().toISOString(),
-      processes: [],
-    };
+    const snapshot = { timestamp: new Date().toISOString(), processes: [] };
 
     for (const proc of metrics) {
       const privateMB = (proc.memory?.private || 0) / (1024 * 1024);
@@ -330,40 +341,23 @@ function sampleMemory() {
           `[Inspector:Memory] ⚠ MEMORY_LEAK_WARNING: Process ${proc.type} (PID ${proc.pid}) ` +
           `private memory ${privateMB.toFixed(1)}MB exceeds ${MEMORY_LEAK_THRESHOLD_MB}MB threshold.`
         );
-
         metricsLog.push({
-          tag: 'memory_leak_warning',
-          value: privateMB,
-          metadata: {
-            processType: proc.type,
-            pid: proc.pid,
-            threshold: MEMORY_LEAK_THRESHOLD_MB,
-            workingSetMB: parseFloat(workingSetMB.toFixed(1)),
-          },
+          tag: 'memory_leak_warning', value: privateMB,
+          metadata: { processType: proc.type, pid: proc.pid, threshold: MEMORY_LEAK_THRESHOLD_MB, workingSetMB: parseFloat(workingSetMB.toFixed(1)) },
           timestamp: new Date().toISOString(),
         });
       }
 
-      const entry = {
-        processType: proc.type,
-        pid: proc.pid,
+      snapshot.processes.push({
+        processType: proc.type, pid: proc.pid,
         privateMemory: parseFloat(privateMB.toFixed(1)),
         workingSet: parseFloat(workingSetMB.toFixed(1)),
-        cpuPercent: proc.cpu?.percentCPUUsage || 0,
-        flag,
-      };
-
-      snapshot.processes.push(entry);
+        cpuPercent: proc.cpu?.percentCPUUsage || 0, flag,
+      });
 
       metricsLog.push({
-        tag: `memory_${proc.type}`,
-        value: privateMB,
-        metadata: {
-          pid: proc.pid,
-          workingSetMB: workingSetMB.toFixed(1),
-          cpuPercent: (proc.cpu?.percentCPUUsage || 0).toFixed(1),
-          flag,
-        },
+        tag: `memory_${proc.type}`, value: privateMB,
+        metadata: { pid: proc.pid, workingSetMB: workingSetMB.toFixed(1), cpuPercent: (proc.cpu?.percentCPUUsage || 0).toFixed(1), flag },
         timestamp: new Date().toISOString(),
       });
     }
@@ -378,98 +372,57 @@ function sampleMemory() {
 }
 
 // ──────────────────────────────────────────────
-// Network Interception — FHIR Validation & PHI Detection (Pillar 2)
+// Network Interception (Pillar 2)
 // ──────────────────────────────────────────────
 
 function setupNetworkInterception() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  // ── session.defaultSession.webRequest: Early PHI detection onBeforeRequest ──
   const filter = { urls: ['http://*/*', 'https://*/*'] };
   session.defaultSession.webRequest.onBeforeRequest(filter, (details, callback) => {
     const urlLower = details.url.toLowerCase();
     const phiKeywords = ['patient', 'mrn', 'medical', 'emr', 'ehr', 'clinical',
                          'diagnosis', 'sensitive', 'phi', 'hipaa', 'provider',
                          'identifier', 'ssn', 'treatment', 'record'];
-
-    // Flag http:// requests containing PHI keywords (unencrypted transmission)
     if (details.url.startsWith('http://') && phiKeywords.some(kw => urlLower.includes(kw))) {
-      const existing = phiUnencryptedTransmissions.find(t => t.url === details.url);
-      if (!existing) {
-        const entry = {
-          url: details.url,
-          timestamp: new Date().toISOString(),
-          statusCode: null,  // Request not yet completed
-          resourceType: details.type || 'unknown',
-        };
+      if (!phiUnencryptedTransmissions.find(t => t.url === details.url)) {
+        const entry = { url: details.url, timestamp: new Date().toISOString(), statusCode: null, resourceType: details.type || 'unknown' };
         phiUnencryptedTransmissions.push(entry);
-        complianceLog.push({
-          standard: 'HIPAA',
-          check: 'PHI_UNENCRYPTED_TRANSMISSION',
-          passed: false,
-          details: JSON.stringify(entry),
-          timestamp: entry.timestamp,
-        });
+        complianceLog.push({ standard: 'HIPAA', check: 'PHI_UNENCRYPTED_TRANSMISSION', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
         console.warn(`[Inspector:PHI] ⚠ PHI_UNENCRYPTED_TRANSMISSION (onBeforeRequest) — ${details.url}`);
       }
     }
     callback({ cancel: false });
   });
 
-  // ── CDP Debugger: Response body inspection for FHIR validation ──
   try {
     const dbg = mainWindow.webContents.debugger;
-
-    if (!dbg.isAttached()) {
-      dbg.attach('1.3');
-    }
-    // debugger attached successfully
+    if (!dbg.isAttached()) { dbg.attach('1.3'); }
 
     dbg.on('message', (_event, method, params) => {
-      // ── Detect FHIR responses ──
       if (method === 'Network.responseReceived') {
         const { requestId, response, type } = params;
-
-        // Get Content-Type from multiple possible header keys
         const headers = response.headers || {};
-        const contentType =
-          headers['content-type'] ||
-          headers['Content-Type'] ||
-          headers['CONTENT-TYPE'] ||
-          '';
-
+        const contentType = headers['content-type'] || headers['Content-Type'] || headers['CONTENT-TYPE'] || '';
         const contentTypeLower = contentType.toLowerCase();
 
-        // ── FHIR Detection ──
-        const isFHIR =
-          contentTypeLower.includes('application/fhir+json') ||
+        const isFHIR = contentTypeLower.includes('application/fhir+json') ||
           (type === 'XHR' && contentTypeLower.includes('json') &&
-           (response.url.toLowerCase().includes('/fhir/') ||
-            response.url.toLowerCase().includes('/r4/') ||
-            response.url.toLowerCase().includes('/patient/') ||
-            response.url.toLowerCase().includes('/observation/')));
+           (response.url.toLowerCase().includes('/fhir/') || response.url.toLowerCase().includes('/r4/') ||
+            response.url.toLowerCase().includes('/patient/') || response.url.toLowerCase().includes('/observation/')));
 
         if (isFHIR) {
-          // Get the response body to validate
           setTimeout(async () => {
             try {
               const { body, base64Encoded } = await dbg.sendCommand('Network.getResponseBody', { requestId });
               const bodyText = base64Encoded ? Buffer.from(body, 'base64').toString('utf-8') : body;
-
               const violations = validateFHIRResource(response.url, bodyText);
               for (const v of violations) {
                 fhirViolations.push(v);
-                complianceLog.push({
-                  standard: 'FHIR_R4',
-                  check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`,
-                  passed: false,
-                  details: JSON.stringify(v),
-                  timestamp: v.timestamp,
-                });
+                complianceLog.push({ standard: 'FHIR_R4', check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`, passed: false, details: JSON.stringify(v), timestamp: v.timestamp });
                 console.warn(`[Inspector:FHIR] ⚠ ${v.errorType} — ${response.url}: ${v.errorDetails}`);
               }
             } catch (bodyErr) {
-              // Body may not be available (redirect, cancelled, etc.)
               if (!bodyErr.message.includes('No resource')) {
                 console.warn('[Inspector:Network] Could not get response body:', bodyErr.message);
               }
@@ -477,64 +430,39 @@ function setupNetworkInterception() {
           }, 100);
         }
 
-        // ── PHI Unencrypted Transmission Detection ──
         if (response.url.startsWith('http://')) {
           const urlLower = response.url.toLowerCase();
           const phiKeywords = ['patient', 'mrn', 'medical', 'emr', 'ehr', 'clinical',
                                'diagnosis', 'sensitive', 'phi', 'hipaa', 'provider',
                                'identifier', 'ssn', 'treatment', 'record'];
-          const hasPHIContent = phiKeywords.some(kw => urlLower.includes(kw));
-
-          if (hasPHIContent) {
-            const existing = phiUnencryptedTransmissions.find(t => t.url === response.url);
-            if (!existing) {
-              const entry = {
-                url: response.url,
-                timestamp: new Date().toISOString(),
-                statusCode: response.status,
-                resourceType: type,
-              };
+          if (phiKeywords.some(kw => urlLower.includes(kw))) {
+            if (!phiUnencryptedTransmissions.find(t => t.url === response.url)) {
+              const entry = { url: response.url, timestamp: new Date().toISOString(), statusCode: response.status, resourceType: type };
               phiUnencryptedTransmissions.push(entry);
-              complianceLog.push({
-                standard: 'HIPAA',
-                check: 'PHI_UNENCRYPTED_TRANSMISSION',
-                passed: false,
-                details: JSON.stringify(entry),
-                timestamp: entry.timestamp,
-              });
+              complianceLog.push({ standard: 'HIPAA', check: 'PHI_UNENCRYPTED_TRANSMISSION', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
               console.warn(`[Inspector:PHI] ⚠ PHI_UNENCRYPTED_TRANSMISSION — ${response.url}`);
             }
           }
         }
 
-        // ── Detect FHIR response even without explicit Content-Type ──
-        // If the URL looks like a FHIR endpoint and the response is JSON
         if (!contentTypeLower.includes('application/fhir+json') && type === 'XHR') {
-          const urlLower = response.url.toLowerCase();
           const fhirPattern = /\/(fhir|r4|metadata|patient|observation|condition|encounter|medication|procedure|diagnosticreport|bundle)\b/i;
-          if (fhirPattern.test(urlLower)) {
+          if (fhirPattern.test(response.url.toLowerCase())) {
             setTimeout(async () => {
               try {
                 const { body, base64Encoded } = await dbg.sendCommand('Network.getResponseBody', { requestId });
                 const bodyText = base64Encoded ? Buffer.from(body, 'base64').toString('utf-8') : body;
-                // Quick check: does it look like a FHIR resource?
                 try {
                   const parsed = JSON.parse(bodyText);
                   if (parsed.resourceType) {
                     const violations = validateFHIRResource(response.url, bodyText);
                     for (const v of violations) {
                       fhirViolations.push(v);
-                      complianceLog.push({
-                        standard: 'FHIR_R4',
-                        check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`,
-                        passed: false,
-                        details: JSON.stringify(v),
-                        timestamp: v.timestamp,
-                      });
+                      complianceLog.push({ standard: 'FHIR_R4', check: `FHIR_VIOLATION: ${v.errorType} at ${response.url}`, passed: false, details: JSON.stringify(v), timestamp: v.timestamp });
                       console.warn(`[Inspector:FHIR] ⚠ ${v.errorType} — ${response.url}: ${v.errorDetails}`);
                     }
                   }
-                } catch (_) { /* not JSON, skip */ }
+                } catch (_) { /* not JSON */ }
               } catch (_) { /* body unavailable */ }
             }, 100);
           }
@@ -542,12 +470,7 @@ function setupNetworkInterception() {
       }
     });
 
-    dbg.sendCommand('Network.enable', {
-      maxTotalBufferSize: 10000000,
-      maxResourceBufferSize: 5000000,
-      maxPostDataSize: 5000000,
-    });
-
+    dbg.sendCommand('Network.enable', { maxTotalBufferSize: 10000000, maxResourceBufferSize: 5000000, maxPostDataSize: 5000000 });
     console.log('[Inspector:Network] Network interception enabled (FHIR validation + PHI detection).');
   } catch (err) {
     console.error('[Inspector:Network] Failed to setup network interception:', err.message);
@@ -560,73 +483,144 @@ function setupNetworkInterception() {
 
 function startAutoLogoffAudit() {
   if (idleTimer) return;
-
-  // Initial check
   checkIdleTime();
-
   idleTimer = setInterval(checkIdleTime, IDLE_POLL_MS);
 }
 
 function stopAutoLogoffAudit() {
-  if (idleTimer) {
-    clearInterval(idleTimer);
-    idleTimer = null;
-  }
+  if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
 }
 
 function checkIdleTime() {
   try {
     const systemIdleSeconds = powerMonitor.getSystemIdleTime();
-
-    // Time since last clinician interaction (from preload timestamps)
-    const interactionMs = lastInteractionTimestamp
-      ? Date.now() - lastInteractionTimestamp
-      : systemIdleSeconds * 1000;
-
-    // Effective inactivity = max of system idle and time since interaction
-    const effectiveInactiveMs = Math.max(
-      systemIdleSeconds * 1000,
-      interactionMs
-    );
-
+    const interactionMs = lastInteractionTimestamp ? Date.now() - lastInteractionTimestamp : systemIdleSeconds * 1000;
+    const effectiveInactiveMs = Math.max(systemIdleSeconds * 1000, interactionMs);
     longestInactivity = Math.max(longestInactivity, effectiveInactiveMs);
 
     if (effectiveInactiveMs > AUTOLOGOFF_TIMEOUT_MS) {
-      const excessiveMin = Math.round(effectiveInactiveMs / 60000);
-
-      // Check if we already flagged this duration to avoid duplicates
       const lastViolation = autoLogoffViolations[autoLogoffViolations.length - 1];
-      const alreadyFlagged = lastViolation &&
-        Math.abs(new Date(lastViolation.timestamp) - Date.now()) < 60000;
-
+      const alreadyFlagged = lastViolation && Math.abs(new Date(lastViolation.timestamp) - Date.now()) < 60000;
       if (!alreadyFlagged) {
-        const entry = {
-          systemIdleSeconds,
-          timeSinceLastInteractionMs: interactionMs,
-          effectiveInactiveMs,
-          timeoutLimitMs: AUTOLOGOFF_TIMEOUT_MS,
-          timestamp: new Date().toISOString(),
-        };
+        const entry = { systemIdleSeconds, timeSinceLastInteractionMs: interactionMs, effectiveInactiveMs, timeoutLimitMs: AUTOLOGOFF_TIMEOUT_MS, timestamp: new Date().toISOString() };
         autoLogoffViolations.push(entry);
-
-        complianceLog.push({
-          standard: 'HIPAA',
-          check: 'AUTOLOGOFF_FAILURE',
-          passed: false,
-          details: JSON.stringify(entry),
-          timestamp: entry.timestamp,
-        });
-        console.warn(
-          `[Inspector:AutoLogoff] ⚠ AUTOLOGOFF_FAILURE: System idle ${excessiveMin}min ` +
-          `exceeds ${AUTOLOGOFF_TIMEOUT_MS / 60000}min limit. ` +
-          `(systemIdle=${systemIdleSeconds}s, interactionAgo=${Math.round(interactionMs / 1000)}s)`
-        );
+        complianceLog.push({ standard: 'HIPAA', check: 'AUTOLOGOFF_FAILURE', passed: false, details: JSON.stringify(entry), timestamp: entry.timestamp });
+        console.warn(`[Inspector:AutoLogoff] ⚠ AUTOLOGOFF_FAILURE: idle ${Math.round(effectiveInactiveMs/60000)}min exceeds ${AUTOLOGOFF_TIMEOUT_MS/60000}min limit.`);
       }
     }
   } catch (err) {
     if (!err.message.includes('powerMonitor')) {
       console.error('[Inspector:AutoLogoff] Failed to check idle time:', err.message);
     }
+  }
+}
+
+// ──────────────────────────────────────────────
+// Layout Shift Screenshot Capture (Pillar 3)
+// ──────────────────────────────────────────────
+
+/**
+ * Compute a simple pixel hash from a nativeImage by averaging blocks
+ */
+function computeImageHash(image) {
+  const size = image.getSize();
+  if (!size || size.width === 0 || size.height === 0) return null;
+
+  const bitmap = image.toBitmap(); // Buffer RGBA
+  const blockSize = 16;
+  const hash = [];
+
+  for (let y = 0; y < size.height; y += blockSize) {
+    for (let x = 0; x < size.width; x += blockSize) {
+      let r = 0, g = 0, b = 0, count = 0;
+      const maxDy = Math.min(blockSize, size.height - y);
+      const maxDx = Math.min(blockSize, size.width - x);
+      for (let dy = 0; dy < maxDy; dy++) {
+        for (let dx = 0; dx < maxDx; dx++) {
+          const idx = ((y + dy) * size.width + (x + dx)) * 4;
+          r += bitmap[idx];
+          g += bitmap[idx + 1];
+          b += bitmap[idx + 2];
+          count++;
+        }
+      }
+      hash.push(Math.round(r / count), Math.round(g / count), Math.round(b / count));
+    }
+  }
+  return hash;
+}
+
+/**
+ * Compare two pixel hashes and return a diff percentage (0-100)
+ */
+function compareHashes(hash1, hash2) {
+  if (!hash1 || !hash2) return 100;
+  const minLen = Math.min(hash1.length, hash2.length);
+  if (minLen === 0) return 100;
+  let totalDiff = 0;
+  for (let i = 0; i < minLen; i++) {
+    totalDiff += Math.abs(hash1[i] - hash2[i]);
+  }
+  // Maximum possible diff: minLen * 255
+  return (totalDiff / (minLen * 255)) * 100;
+}
+
+/**
+ * Capture a screenshot when a layout shift is detected (throttled to 1 capture per 2s)
+ */
+async function captureLayoutShift(shiftValue) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  // Throttle: at most one capture every 2 seconds
+  const now = Date.now();
+  if (now - lastLayoutShiftCapture < 2000) return;
+  lastLayoutShiftCapture = now;
+
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const screenshotPath = path.join(SCREENSHOTS_DIR, `shift-${timestamp}.png`);
+
+    // Capture the page
+    const image = await mainWindow.webContents.capturePage();
+    fs.writeFileSync(screenshotPath, image.toPNG());
+
+    const currentHash = computeImageHash(image);
+    let diffPercent = 100;
+    let screenshotBefore = previousScreenshotPath;
+
+    if (previousScreenshotHash && previousScreenshotPath) {
+      diffPercent = compareHashes(previousScreenshotHash, currentHash);
+    }
+
+    // Update state for next comparison
+    previousScreenshotPath = screenshotPath;
+    previousScreenshotHash = currentHash;
+
+    const entry = {
+      timestamp: new Date().toISOString(),
+      shiftValue,
+      diffPercent: parseFloat(diffPercent.toFixed(2)),
+      screenshotBefore: diffPercent > 5 ? screenshotBefore : null,
+      screenshotAfter: diffPercent > 5 ? screenshotPath : null,
+      isSignificant: diffPercent > 5,
+    };
+
+    layoutShifts.push(entry);
+
+    if (diffPercent > 5) {
+      console.warn(`[Inspector:LayoutShift] ⚠ SIGNIFICANT_LAYOUT_SHIFT: ${diffPercent.toFixed(1)}% change (CLS: ${shiftValue})`);
+      uxLog.push({
+        category: 'layout_shift',
+        score: diffPercent,
+        element: null,
+        note: `SIGNIFICANT_LAYOUT_SHIFT: ${diffPercent.toFixed(1)}% change, CLS=${shiftValue}, screenshot=${screenshotPath}`,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      console.log(`[Inspector:LayoutShift] Layout shift captured: ${diffPercent.toFixed(1)}% change (CLS: ${shiftValue})`);
+    }
+  } catch (err) {
+    console.error('[Inspector:LayoutShift] Failed to capture screenshot:', err.message);
   }
 }
 
@@ -649,7 +643,8 @@ function injectPerformanceObservers() {
         lastClickedElement = {
           tag: el.tagName || '',
           id: el.id || '',
-          className: (el.className && typeof el.className === 'string') ? el.className : ''
+          className: (el.className && typeof el.className === 'string') ? el.className : '',
+          text: (el.textContent || '').substring(0, 50)
         };
       }, true);
 
@@ -659,14 +654,10 @@ function injectPerformanceObservers() {
           for (var i = 0; i < entries.length; i++) {
             var entry = entries[i];
             if (entry.name === 'first-paint') {
-              window.inspector.reportMetric('FP', entry.startTime, {
-                type: 'CoreWebVital', metric: 'FP', currentURL: window.location.href
-              });
+              window.inspector.reportMetric('FP', entry.startTime, { type: 'CoreWebVital', metric: 'FP', currentURL: window.location.href });
             }
             if (entry.name === 'first-contentful-paint') {
-              window.inspector.reportMetric('FCP', entry.startTime, {
-                type: 'CoreWebVital', metric: 'FCP', currentURL: window.location.href
-              });
+              window.inspector.reportMetric('FCP', entry.startTime, { type: 'CoreWebVital', metric: 'FCP', currentURL: window.location.href });
             }
           }
         });
@@ -678,12 +669,7 @@ function injectPerformanceObservers() {
           var entries = list.getEntries();
           if (entries.length > 0) {
             var entry = entries[entries.length - 1];
-            window.inspector.reportMetric('LCP', entry.startTime, {
-              type: 'CoreWebVital', metric: 'LCP',
-              size: entry.size || 0,
-              element: entry.element ? (entry.element.tagName || '') : '',
-              currentURL: window.location.href
-            });
+            window.inspector.reportMetric('LCP', entry.startTime, { type: 'CoreWebVital', metric: 'LCP', size: entry.size || 0, element: entry.element ? (entry.element.tagName || '') : '', currentURL: window.location.href });
           }
         });
         lcpObserver.observe({ type: 'largest-contentful-paint', buffered: true });
@@ -698,16 +684,13 @@ function injectPerformanceObservers() {
               clsValue += entries[i].value;
             }
           }
-          window.inspector.reportMetric('CLS_ongoing', clsValue, {
-            type: 'CoreWebVital', metric: 'CLS', currentURL: window.location.href
-          });
+          window.inspector.reportMetric('CLS_ongoing', clsValue, { type: 'CoreWebVital', metric: 'CLS', currentURL: window.location.href });
+          // Trigger screenshot capture for layout shift visualization
+          window.inspector.reportLayoutShift(clsValue);
         });
         clsObserver.observe({ type: 'layout-shift', buffered: true });
-
         window.addEventListener('beforeunload', function() {
-          window.inspector.reportMetric('CLS', clsValue, {
-            type: 'CoreWebVital', metric: 'CLS', currentURL: window.location.href
-          });
+          window.inspector.reportMetric('CLS', clsValue, { type: 'CoreWebVital', metric: 'CLS', currentURL: window.location.href });
         });
       } catch(e) { console.warn('[Inspector] CLS observer not supported', e); }
 
@@ -716,14 +699,8 @@ function injectPerformanceObservers() {
           var entries = list.getEntries();
           for (var i = 0; i < entries.length; i++) {
             var task = entries[i];
-            var duration = task.duration;
-            var trigger = lastClickedElement || { tag: '', id: '', className: '' };
-
-            window.inspector.reportMetric('LongTask', duration, {
-              type: 'perf:longTask',
-              triggerElement: trigger,
-              currentURL: window.location.href
-            });
+            var trigger = lastClickedElement || { tag: '', id: '', className: '', text: '' };
+            window.inspector.reportMetric('LongTask', task.duration, { type: 'perf:longTask', triggerElement: trigger, currentURL: window.location.href });
           }
         });
         longTaskObserver.observe({ type: 'longtask', buffered: true });
@@ -735,7 +712,7 @@ function injectPerformanceObservers() {
 }
 
 // ──────────────────────────────────────────────
-// Inject Compliance Scanners into page (Pillar 2)
+// Inject Compliance Scanners (Pillar 2)
 // ──────────────────────────────────────────────
 
 function injectComplianceScanners() {
@@ -743,214 +720,315 @@ function injectComplianceScanners() {
 
   mainWindow.webContents.executeJavaScript(`
     (function() {
-      // Skip if already injected for this page
       if (window.__inspectorComplianceInjected) return;
       window.__inspectorComplianceInjected = true;
 
       var currentURL = window.location.href;
 
-      // ════════════════════════════════════════
-      // 1. Storage PHI Scanner
-      // ════════════════════════════════════════
-
+      // ── Storage PHI Scanner ──
       function scanStorageForPHI() {
         var patterns = [
           { name: 'MRN', regex: /\\bMRN[-:]?\\s*\\d{4,12}\\b/i },
           { name: 'DOB', regex: /\\b\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}\\b/ },
           { name: 'NHS/ID', regex: /\\b[A-Z]{2}\\d{6}[A-Z]\\b/ },
         ];
-
         var stores = [
           { name: 'localStorage', store: window.localStorage },
           { name: 'sessionStorage', store: window.sessionStorage },
         ];
-
         var results = [];
-
         for (var si = 0; si < stores.length; si++) {
-          var storeInfo = stores[si];
-          var store = storeInfo.store;
+          var storeInfo = stores[si], store = storeInfo.store;
           if (!store) continue;
-
           try {
             for (var ki = 0; ki < store.length; ki++) {
-              var key = store.key(ki);
-              var value = '';
+              var key = store.key(ki), value = '';
               try { value = store.getItem(key) || ''; } catch(e) { value = ''; }
-
               for (var pi = 0; pi < patterns.length; pi++) {
                 var pattern = patterns[pi];
                 if (pattern.regex.test(value) || pattern.regex.test(key)) {
-                  results.push({
-                    store: storeInfo.name,
-                    key: key,
-                    pattern: pattern.name,
-                    timestamp: new Date().toISOString()
-                  });
+                  results.push({ store: storeInfo.name, key: key, pattern: pattern.name, timestamp: new Date().toISOString() });
                 }
               }
             }
-          } catch(e) {
-            console.warn('[Inspector] Storage scan error:', e.message);
-          }
+          } catch(e) { console.warn('[Inspector] Storage scan error:', e.message); }
         }
-
         for (var ri = 0; ri < results.length; ri++) {
-          window.inspector.reportCompliance('HIPAA',
-            'PHI_IN_STORAGE: ' + results[ri].pattern + ' found in ' + results[ri].store + '[' + results[ri].key + ']',
-            false,
-            JSON.stringify(results[ri]));
+          window.inspector.reportCompliance('HIPAA', 'PHI_IN_STORAGE: ' + results[ri].pattern + ' found in ' + results[ri].store + '[' + results[ri].key + ']', false, JSON.stringify(results[ri]));
         }
-
         return results;
       }
 
-      // ════════════════════════════════════════
-      // 2. JCI IPSG-1 Patient Identifier Check
-      // ════════════════════════════════════════
-
+      // ── JCI IPSG-1 Check ──
       var lastJCIReportKey = null;
-
       function checkPatientIdentifiers() {
         var body = document.body;
         if (!body) return;
-
         var text = (body.innerText || body.textContent || '').substring(0, 10000);
-        var url = window.location.href;
-        var title = document.title;
-
-        // Check if we're on a patient-related page
-        var isPatientPage = /patient|emr|ehr|chart|record|medical|clinical|encounter/i.test(url) ||
-                            /patient|emr|ehr|chart|record|medical|clinical|encounter/i.test(title);
-
+        var url = window.location.href, title = document.title;
+        var isPatientPage = /patient|emr|ehr|chart|record|medical|clinical|encounter/i.test(url) || /patient|emr|ehr|chart|record|medical|clinical|encounter/i.test(title);
         if (!isPatientPage) return;
-
-        var identifiersFound = 0;
-        var identifierTypes = [];
-
-        // Full Name pattern (two or more capitalized words)
-        if (/[A-Z][a-z]+\\s+[A-Z][a-z]+/.test(text)) {
-          identifiersFound++;
-          identifierTypes.push('Full Name');
-        }
-
-        // MRN pattern
-        if (/\\bMRN[-:]?\\s*\\d{4,12}\\b/i.test(text)) {
-          identifiersFound++;
-          identifierTypes.push('MRN');
-        }
-
-        // DOB pattern
-        if (/\\b\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}\\b/.test(text)) {
-          identifiersFound++;
-          identifierTypes.push('Date of Birth');
-        }
-
-        // Patient ID pattern
-        if (/\\bPatient\\s*ID\\b|\\bPID[-:]\\s*\\w+\\b/i.test(text) || /\\b\\d{6,10}\\b/.test(text)) {
-          identifiersFound++;
-          identifierTypes.push('Patient ID');
-        }
-
+        var identifiersFound = 0, identifierTypes = [];
+        if (/[A-Z][a-z]+\\s+[A-Z][a-z]+/.test(text)) { identifiersFound++; identifierTypes.push('Full Name'); }
+        if (/\\bMRN[-:]?\\s*\\d{4,12}\\b/i.test(text)) { identifiersFound++; identifierTypes.push('MRN'); }
+        if (/\\b\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{4}\\b/.test(text)) { identifiersFound++; identifierTypes.push('Date of Birth'); }
+        if (/\\bPatient\\s*ID\\b|\\bPID[-:]\\s*\\w+\\b/i.test(text) || /\\b\\d{6,10}\\b/.test(text)) { identifiersFound++; identifierTypes.push('Patient ID'); }
         if (identifiersFound > 0 && identifiersFound < 2) {
           var checkKey = url + '|' + identifiersFound;
           if (checkKey !== lastJCIReportKey) {
             lastJCIReportKey = checkKey;
-            window.inspector.reportCompliance('JCI',
-              'JCI_IPSG1_VIOLATION: Only ' + identifiersFound + ' patient identifier(s) visible (' + identifierTypes.join(', ') + ')',
-              false,
-              JSON.stringify({ url: url, identifiersFound: identifiersFound, identifierTypes: identifierTypes }));
+            window.inspector.reportCompliance('JCI', 'JCI_IPSG1_VIOLATION: Only ' + identifiersFound + ' patient identifier(s) visible (' + identifierTypes.join(', ') + ')', false, JSON.stringify({ url: url, identifiersFound: identifiersFound, identifierTypes: identifierTypes }));
+          }
+        }
+      }
+
+      // ── Interaction Timestamps ──
+      var interactionThrottleTimer = null;
+      function sendInteractionTimestamp() { window.inspector.reportInteraction(Date.now()); }
+      document.addEventListener('mousemove', function() {
+        if (!interactionThrottleTimer) {
+          interactionThrottleTimer = setTimeout(function() { interactionThrottleTimer = null; sendInteractionTimestamp(); }, 5000);
+        }
+      }, { passive: true });
+      document.addEventListener('keydown', function() {
+        if (!interactionThrottleTimer) {
+          interactionThrottleTimer = setTimeout(function() { interactionThrottleTimer = null; sendInteractionTimestamp(); }, 5000);
+        }
+      }, { passive: true });
+
+      // ── Run initial scans ──
+      setTimeout(function() { scanStorageForPHI(); }, 1500);
+      window.addEventListener('storage', function() { setTimeout(scanStorageForPHI, 500); });
+
+      var jciCheckTimer = null;
+      function debouncedJCICheck() { if (jciCheckTimer) clearTimeout(jciCheckTimer); jciCheckTimer = setTimeout(checkPatientIdentifiers, 2000); }
+      setTimeout(checkPatientIdentifiers, 2000);
+      try {
+        var bodyObserver = new MutationObserver(function() { debouncedJCICheck(); });
+        if (document.body) {
+          bodyObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        } else {
+          var bodyReadyCheck = setInterval(function() {
+            if (document.body) { bodyObserver.observe(document.body, { childList: true, subtree: true, characterData: true }); clearInterval(bodyReadyCheck); }
+          }, 200);
+        }
+      } catch(e) { console.warn('[Inspector] JCI MutationObserver error:', e.message); }
+
+      var pushState = history.pushState;
+      history.pushState = function() { pushState.apply(this, arguments); window.__inspectorComplianceInjected = false; };
+      var replaceState = history.replaceState;
+      history.replaceState = function() { replaceState.apply(this, arguments); window.__inspectorComplianceInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector] Could not inject compliance scanners:', err.message);
+  });
+}
+
+// ──────────────────────────────────────────────
+// Inject UX Scanners — Rage-Click & Dead-Click (Pillar 3)
+// ──────────────────────────────────────────────
+
+function injectUXScanners() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorUXInjected) return;
+      window.__inspectorUXInjected = true;
+
+      // ════════════════════════════════════════
+      // Shared state
+      // ════════════════════════════════════════
+
+      var clickHistory = [];
+      var pendingDeadClickChecks = [];
+      var lastMutationTime = Date.now();
+
+      // Track DOM mutations for dead-click detection
+      try {
+        var uxMutationObserver = new MutationObserver(function() {
+          lastMutationTime = Date.now();
+        });
+        if (document.body) {
+          uxMutationObserver.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+        }
+      } catch(e) { /* body not ready */ }
+
+      // Track network requests for dead-click detection
+      var originalFetch = window.fetch;
+      window.fetch = function() {
+        lastMutationTime = Date.now();
+        return originalFetch.apply(this, arguments);
+      };
+      var originalXHROpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function() {
+        lastMutationTime = Date.now();
+        return originalXHROpen.apply(this, arguments);
+      };
+
+      // ════════════════════════════════════════
+      // Rage-Click Detection
+      // ════════════════════════════════════════
+
+      function checkRageClick(x, y, element, timestamp) {
+        // Filter clicks within the last 500ms
+        var recentClicks = clickHistory.filter(function(c) { return (timestamp - c.timestamp) <= 500; });
+        recentClicks.push({ x: x, y: y, timestamp: timestamp });
+
+        if (recentClicks.length >= 3) {
+          // Check if all clicks are within 40px radius
+          var allClose = true;
+          for (var i = 0; i < recentClicks.length && allClose; i++) {
+            for (var j = i + 1; j < recentClicks.length && allClose; j++) {
+              var dx = recentClicks[i].x - recentClicks[j].x;
+              var dy = recentClicks[i].y - recentClicks[j].y;
+              var dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > 40) allClose = false;
+            }
+          }
+
+          if (allClose) {
+            // Wait 800ms to see if anything happens
+            var checkTime = Date.now();
+            var beforeMutation = lastMutationTime;
+            setTimeout(function() {
+              var nowMutation = lastMutationTime;
+              if (nowMutation <= beforeMutation) {
+                // No mutation or network happened — flag RAGE_CLICK
+                window.inspector.reportUX('rage_click', recentClicks.length, JSON.stringify({
+                  x: x, y: y,
+                  element: element,
+                  clickCount: recentClicks.length,
+                  timestamp: timestamp
+                }), 'RAGE_CLICK: ' + recentClicks.length + ' rapid clicks on ' + (element.tag || 'unknown'));
+              }
+            }, 800);
           }
         }
       }
 
       // ════════════════════════════════════════
-      // 3. Clinician Interaction Timestamps
+      // Dead-Click Detection
       // ════════════════════════════════════════
 
-      var interactionThrottleTimer = null;
+      function checkDeadClick(element, timestamp) {
+        var beforeMutation = lastMutationTime;
+        var deadCheckId = Date.now() + '_' + Math.random();
+        pendingDeadClickChecks.push(deadCheckId);
 
-      function sendInteractionTimestamp() {
-        window.inspector.reportInteraction(Date.now());
+        setTimeout(function() {
+          var idx = pendingDeadClickChecks.indexOf(deadCheckId);
+          if (idx !== -1) pendingDeadClickChecks.splice(idx, 1);
+
+          var afterMutation = lastMutationTime;
+          if (afterMutation <= beforeMutation) {
+            // No mutation or network followed the click
+            window.inspector.reportUX('dead_click', 0, JSON.stringify({
+              element: element,
+              timestamp: timestamp
+            }), 'DEAD_CLICK on ' + (element.tag || 'unknown'));
+          }
+        }, 800);
       }
-
-      document.addEventListener('mousemove', function() {
-        if (!interactionThrottleTimer) {
-          interactionThrottleTimer = setTimeout(function() {
-            interactionThrottleTimer = null;
-            sendInteractionTimestamp();
-          }, 5000);
-        }
-      }, { passive: true });
-
-      document.addEventListener('keydown', function() {
-        if (!interactionThrottleTimer) {
-          interactionThrottleTimer = setTimeout(function() {
-            interactionThrottleTimer = null;
-            sendInteractionTimestamp();
-          }, 5000);
-        }
-      }, { passive: true });
 
       // ════════════════════════════════════════
-      // 4. Run initial scans
+      // Click Handler
       // ════════════════════════════════════════
 
-      // Run PHI storage scan after a short delay to let page data load
-      setTimeout(function() {
-        scanStorageForPHI();
-      }, 1500);
+      document.addEventListener('click', function(e) {
+        var el = e.target;
+        var element = {
+          tag: el.tagName || '',
+          id: el.id || '',
+          className: (el.className && typeof el.className === 'string') ? el.className.substring(0, 100) : '',
+          text: (el.textContent || '').substring(0, 50)
+        };
 
-      // Re-scan storage when other tabs modify it
-      window.addEventListener('storage', function(e) {
-        // Debounce: re-scan storage after a write from another tab/window
-        setTimeout(scanStorageForPHI, 500);
-      });
+        var x = e.clientX, y = e.clientY, now = Date.now();
 
-      // Setup JCI IPSG-1 MutationObserver on the body
-      var jciCheckTimer = null;
-      function debouncedJCICheck() {
-        if (jciCheckTimer) clearTimeout(jciCheckTimer);
-        jciCheckTimer = setTimeout(checkPatientIdentifiers, 2000);
-      }
+        // Record click for rage-click detection
+        clickHistory.push({ x: x, y: y, timestamp: now });
+        // Prune clicks older than 1s
+        clickHistory = clickHistory.filter(function(c) { return (now - c.timestamp) <= 1000; });
 
-      // Check on initial load
-      setTimeout(checkPatientIdentifiers, 2000);
+        // Run detectors
+        checkRageClick(x, y, element, now);
+        checkDeadClick(element, now);
+      }, true);
 
-      // Observe DOM mutations for dynamic content
-      try {
-        var bodyObserver = new MutationObserver(function() {
-          debouncedJCICheck();
-        });
-        if (document.body) {
-          bodyObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-        } else {
-          // Wait for body to exist
-          var bodyReadyCheck = setInterval(function() {
-            if (document.body) {
-              bodyObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-              clearInterval(bodyReadyCheck);
-            }
-          }, 200);
-        }
-      } catch(e) {
-        console.warn('[Inspector] JCI MutationObserver setup error:', e.message);
-      }
+      // ════════════════════════════════════════
+      // Cleanup on SPA navigation
+      // ════════════════════════════════════════
 
-      // Handle SPA navigation via history API
-      var pushState = history.pushState;
-      history.pushState = function() {
-        pushState.apply(this, arguments);
-        window.__inspectorComplianceInjected = false;
-      };
-      var replaceState = history.replaceState;
-      history.replaceState = function() {
-        replaceState.apply(this, arguments);
-        window.__inspectorComplianceInjected = false;
-      };
+      var uxPushState = history.pushState;
+      history.pushState = function() { uxPushState.apply(this, arguments); window.__inspectorUXInjected = false; };
+      var uxReplaceState = history.replaceState;
+      history.replaceState = function() { uxReplaceState.apply(this, arguments); window.__inspectorUXInjected = false; };
     })();
   `).catch(function(err) {
-    console.warn('[Inspector] Could not inject compliance scanners:', err.message);
+    console.warn('[Inspector] Could not inject UX scanners:', err.message);
+  });
+}
+
+// ──────────────────────────────────────────────
+// Inject axe-core Accessibility Scanner (Pillar 3)
+// ──────────────────────────────────────────────
+
+function injectAxeScanner(force) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!axeCoreSource) return;
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (window.__inspectorAxeInjected) return;
+      if (${!!force}) { window.__inspectorAxeInjected = false; }
+      if (window.__inspectorAxeInjected) return;
+      window.__inspectorAxeInjected = true;
+
+      // Inject axe-core source
+      ${axeCoreSource}
+
+      // Run axe-core with focused rules
+      axe.run(document, {
+        runOnly: {
+          type: 'tag',
+          values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']
+        },
+        resultTypes: ['violations'],
+        rules: {
+          'color-contrast': { enabled: true },
+          'label': { enabled: true },
+          'keyboard': { enabled: true },
+          'aria-required-attr': { enabled: true }
+        }
+      }).then(function(results) {
+        var violations = results.violations || [];
+
+        var critical = violations.filter(function(v) { return v.impact === 'critical'; });
+        var serious = violations.filter(function(v) { return v.impact === 'serious'; });
+        var moderate = violations.filter(function(v) { return v.impact === 'moderate' || v.impact === 'minor'; });
+
+        window.inspector.reportAxeResults({
+          score: violations.length === 0 ? 100 : Math.max(0, 100 - violations.length * 5),
+          totalViolations: violations.length,
+          criticalViolations: critical.map(function(v) { return { id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes.length }; }),
+          seriousViolations: serious.map(function(v) { return { id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes.length }; }),
+          moderateViolations: moderate.map(function(v) { return { id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes.length }; }),
+          url: window.location.href,
+          timestamp: new Date().toISOString()
+        });
+      }).catch(function(err) {
+        console.warn('[Inspector:Axe] Error:', err.message);
+      });
+
+      // Reset flag on SPA navigation
+      var axePushState = history.pushState;
+      history.pushState = function() { axePushState.apply(this, arguments); window.__inspectorAxeInjected = false; };
+      var axeReplaceState = history.replaceState;
+      history.replaceState = function() { axeReplaceState.apply(this, arguments); window.__inspectorAxeInjected = false; };
+    })();
+  `).catch(function(err) {
+    console.warn('[Inspector:Axe] Could not inject axe-core:', err.message);
   });
 }
 
@@ -962,111 +1040,98 @@ function setupIPC() {
   // ── Core audit events ──
 
   ipcMain.on('inspector:reportMetric', (_event, { tag, value, metadata }) => {
-    const entry = {
-      tag,
-      value,
-      metadata: metadata || {},
-      timestamp: new Date().toISOString(),
-    };
+    const entry = { tag, value, metadata: metadata || {}, timestamp: new Date().toISOString() };
     metricsLog.push(entry);
     console.log(`[Inspector:Metric] ${tag} = ${value}`);
 
     const meta = metadata || {};
     if (meta.type === 'CoreWebVital') {
-      const vitalName = meta.metric || tag;
-      performanceCoreWebVitals[vitalName] = {
-        value,
-        timestamp: entry.timestamp,
-        url: meta.currentURL || '',
-      };
+      performanceCoreWebVitals[meta.metric || tag] = { value, timestamp: entry.timestamp, url: meta.currentURL || '' };
     }
     if (meta.type === 'perf:longTask') {
-      performanceLongTasks.push({
-        duration: value,
-        triggerElement: meta.triggerElement || { tag: '', id: '', className: '' },
-        timestamp: entry.timestamp,
-        currentURL: meta.currentURL || '',
-      });
+      performanceLongTasks.push({ duration: value, triggerElement: meta.triggerElement || { tag: '', id: '', className: '' }, timestamp: entry.timestamp, currentURL: meta.currentURL || '' });
     }
   });
 
   ipcMain.on('inspector:reportCompliance', (_event, { standard, check, passed, details }) => {
-    const entry = {
-      standard,
-      check,
-      passed,
-      details: details || '',
-      timestamp: new Date().toISOString(),
-    };
+    const entry = { standard, check, passed, details: details || '', timestamp: new Date().toISOString() };
     complianceLog.push(entry);
 
-    // Route to specialized compliance stores
     const detailsObj = (() => { try { return JSON.parse(details || '{}'); } catch(e) { return {}; } })();
-
     if (check.startsWith('PHI_IN_STORAGE')) {
-      phiStorageFlags.push({
-        key: detailsObj.key || 'unknown',
-        pattern: detailsObj.pattern || 'unknown',
-        store: detailsObj.store || 'unknown',
-        timestamp: entry.timestamp,
-      });
+      phiStorageFlags.push({ key: detailsObj.key || 'unknown', pattern: detailsObj.pattern || 'unknown', store: detailsObj.store || 'unknown', timestamp: entry.timestamp });
     }
-
     if (check.startsWith('JCI_IPSG1_VIOLATION')) {
-      jciIpsg1Violations.push({
-        url: detailsObj.url || '',
-        timestamp: entry.timestamp,
-        identifiersFound: detailsObj.identifiersFound || 0,
-        identifierTypes: detailsObj.identifierTypes || [],
-      });
+      jciIpsg1Violations.push({ url: detailsObj.url || '', timestamp: entry.timestamp, identifiersFound: detailsObj.identifiersFound || 0, identifierTypes: detailsObj.identifierTypes || [] });
     }
 
-    const icon = passed ? '\u2713' : '\u2717';
-    console.log(`[Inspector:Compliance] ${icon} ${standard} \u2014 ${check}`);
+    console.log(`[Inspector:Compliance] ${passed ? '\u2713' : '\u2717'} ${standard} \u2014 ${check}`);
   });
 
   ipcMain.on('inspector:reportUX', (_event, { category, score, element, note }) => {
-    uxLog.push({
-      category,
-      score,
-      element: element || null,
-      note: note || '',
-      timestamp: new Date().toISOString(),
-    });
+    const entry = { category, score, element: element || null, note: note || '', timestamp: new Date().toISOString() };
+    uxLog.push(entry);
+
+    // Route UX events to specialized stores
+    if (category === 'rage_click') {
+      const el = (() => { try { return JSON.parse(element || '{}'); } catch(e) { return {}; } })();
+      rageClicks.push({ x: el.x, y: el.y, element: el.element, timestamp: entry.timestamp, clickCount: el.clickCount || score });
+    }
+    if (category === 'dead_click') {
+      const el = (() => { try { return JSON.parse(element || '{}'); } catch(e) { return {}; } })();
+      deadClicks.push({ element: el.element, timestamp: entry.timestamp });
+    }
+
     console.log(`[Inspector:UX] ${category} score=${score}`);
   });
 
   ipcMain.on('inspector:reportError', (_event, { source, message, stack }) => {
-    errorLog.push({
-      source,
-      message,
-      stack: stack || null,
-      timestamp: new Date().toISOString(),
-    });
+    errorLog.push({ source, message, stack: stack || null, timestamp: new Date().toISOString() });
     console.error(`[Inspector:Error] ${source}: ${message}`);
   });
 
-  // ── Clinician Interaction Timestamp (from preload) ──
+  // ── Interaction Timestamp (Pillar 2) ──
 
   ipcMain.on('inspector:reportInteraction', (_event, { timestamp }) => {
     lastInteractionTimestamp = timestamp;
   });
 
+  // ── Layout Shift (Pillar 3) ──
+
+  ipcMain.on('inspector:layoutShift', (_event, { shiftValue }) => {
+    captureLayoutShift(shiftValue);
+  });
+
+  // ── Axe-core Results (Pillar 3) ──
+
+  ipcMain.on('inspector:reportAxeResults', (_event, results) => {
+    if (results) {
+      accessibilityAudit.score = results.score;
+      accessibilityAudit.totalViolations = results.totalViolations;
+      accessibilityAudit.criticalViolations = results.criticalViolations || [];
+      accessibilityAudit.seriousViolations = results.seriousViolations || [];
+      accessibilityAudit.moderateViolations = results.moderateViolations || [];
+      accessibilityAudit.url = results.url;
+      accessibilityAudit.timestamp = results.timestamp;
+      console.log(`[Inspector:Axe] Scan complete: ${results.totalViolations} violations (${(results.criticalViolations || []).length} critical, ${(results.seriousViolations || []).length} serious)`);
+    }
+  });
+
+  // ── On-demand axe-core trigger (Pillar 3) ──
+
+  ipcMain.handle('inspector:runAxe', async () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      injectAxeScanner(true);
+      return { success: true };
+    }
+    return { success: false, error: 'No active window' };
+  });
+
   // ── Tracing IPC ──
 
-  ipcMain.handle('inspector:startTrace', async () => {
-    await startTrace();
-    return { success: true };
-  });
-
-  ipcMain.handle('inspector:stopTrace', async () => {
-    const tracePath = await stopTrace();
-    return { success: !!tracePath, tracePath };
-  });
-
-  ipcMain.handle('inspector:getTraceStatus', async () => {
-    return { traceActive };
-  });
+  ipcMain.handle('inspector:startTrace', async () => { await startTrace(); return { success: true }; });
+  ipcMain.handle('inspector:stopTrace', async () => { const tracePath = await stopTrace(); return { success: !!tracePath, tracePath }; });
+  ipcMain.handle('inspector:getTraceStatus', async () => { return { traceActive }; });
 
   // ── Report generation ──
 
@@ -1074,23 +1139,14 @@ function setupIPC() {
     try {
       const { ReportAggregator } = require('./reporting');
       const aggregator = new ReportAggregator(
-        metricsLog,
-        complianceLog,
-        uxLog,
-        errorLog,
-        performanceCoreWebVitals,
-        performanceLongTasks,
-        performanceMemorySnapshots,
-        performanceTraceFilePath,
-        REPORTS_DIR,
-        // Pillar 2 compliance data
-        fhirViolations,
-        phiStorageFlags,
-        phiUnencryptedTransmissions,
-        jciIpsg1Violations,
-        autoLogoffViolations,
-        longestInactivity,
-        AUTOLOGOFF_TIMEOUT_MS
+        metricsLog, complianceLog, uxLog, errorLog,
+        performanceCoreWebVitals, performanceLongTasks, performanceMemorySnapshots,
+        performanceTraceFilePath, REPORTS_DIR,
+        // Pillar 2
+        fhirViolations, phiStorageFlags, phiUnencryptedTransmissions,
+        jciIpsg1Violations, autoLogoffViolations, longestInactivity, AUTOLOGOFF_TIMEOUT_MS,
+        // Pillar 3
+        rageClicks, deadClicks, layoutShifts, accessibilityAudit
       );
       const filePath = aggregator.generateReport();
       return { success: true, filePath };
@@ -1102,41 +1158,29 @@ function setupIPC() {
   // ── Live status ──
 
   ipcMain.handle('inspector:getLogCounts', async () => {
-    return {
-      metrics: metricsLog.length,
-      compliance: complianceLog.length,
-      ux: uxLog.length,
-      errors: errorLog.length,
-    };
+    return { metrics: metricsLog.length, compliance: complianceLog.length, ux: uxLog.length, errors: errorLog.length };
   });
-
-  // ── Compliance counts ──
 
   ipcMain.handle('inspector:getComplianceCounts', async () => {
     return {
-      fhirViolations: fhirViolations.length,
-      phiUnencryptedTransmissions: phiUnencryptedTransmissions.length,
-      phiStorageFlags: phiStorageFlags.length,
-      jciViolations: jciIpsg1Violations.length,
+      fhirViolations: fhirViolations.length, phiUnencryptedTransmissions: phiUnencryptedTransmissions.length,
+      phiStorageFlags: phiStorageFlags.length, jciViolations: jciIpsg1Violations.length,
       autoLogoffViolations: autoLogoffViolations.length,
+    };
+  });
+
+  ipcMain.handle('inspector:getUXCounts', async () => {
+    return {
+      rageClicks: rageClicks.length, deadClicks: deadClicks.length,
+      layoutShifts: layoutShifts.length, accessibilityViolations: accessibilityAudit.totalViolations,
     };
   });
 
   // ── Window controls ──
 
-  ipcMain.on('window:minimize', () => {
-    if (mainWindow) mainWindow.minimize();
-  });
-
-  ipcMain.on('window:maximize', () => {
-    if (mainWindow) {
-      mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
-    }
-  });
-
-  ipcMain.on('window:close', () => {
-    if (mainWindow) mainWindow.close();
-  });
+  ipcMain.on('window:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+  ipcMain.on('window:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+  ipcMain.on('window:close', () => { if (mainWindow) mainWindow.close(); });
 }
 
 // ──────────────────────────────────────────────
@@ -1145,41 +1189,31 @@ function setupIPC() {
 
 app.whenReady().then(() => {
   ensureReportsDir();
-
-  // Load FHIR R4 schema for validation
   loadFHIRSchema();
-
   setupIPC();
   createMainWindow();
 
-  // Start Pillar 1 features
   startMemoryMonitoring();
   startTrace();
-
-  // Start Pillar 2 features
   setupNetworkInterception();
   startAutoLogoffAudit();
 
-  // On page load
   mainWindow.webContents.on('did-finish-load', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
 
-    mainWindow.webContents.send('inspector:ready', {
-      reportsDir: REPORTS_DIR,
-      targetUrl: TARGET_URL,
-    });
+    mainWindow.webContents.send('inspector:ready', { reportsDir: REPORTS_DIR, targetUrl: TARGET_URL });
 
-    // Inject Pillar 1: PerformanceObservers
+    // Pillar 1
     injectPerformanceObservers();
-
-    // Inject Pillar 2: Compliance scanners
+    // Pillar 2
     injectComplianceScanners();
+    // Pillar 3
+    injectUXScanners();
+    injectAxeScanner();
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) { createMainWindow(); }
   });
 });
 
@@ -1189,7 +1223,6 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Cleanup debugger on quit
 app.on('before-quit', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {

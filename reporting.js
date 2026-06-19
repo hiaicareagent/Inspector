@@ -12,31 +12,24 @@ class ReportAggregator {
    * @param {Array}  memorySnapshots
    * @param {string|null} traceFilePath
    * @param {string} reportsDir
-   * @param {Array}  fhirViolations         — [ { url, timestamp, errorType, errorDetails }, ... ]
-   * @param {Array}  phiStorageFlags        — [ { key, pattern, store, timestamp }, ... ]
-   * @param {Array}  phiUnencryptedTransmissions  — [ { url, timestamp }, ... ]
-   * @param {Array}  jciViolations          — [ { url, timestamp, identifiersFound, identifierTypes }, ... ]
-   * @param {Array}  autoLogoffViolations   — [ { systemIdleSeconds, effectiveInactiveMs, timestamp }, ... ]
-   * @param {number} longestInactivity      — ms
-   * @param {number} autoLogoffTimeoutMs    — configured timeout in ms
+   * @param {Array}  fhirViolations
+   * @param {Array}  phiStorageFlags
+   * @param {Array}  phiUnencryptedTransmissions
+   * @param {Array}  jciViolations
+   * @param {Array}  autoLogoffViolations
+   * @param {number} longestInactivity
+   * @param {number} autoLogoffTimeoutMs
+   * @param {Array}  rageClicks           — [ { x, y, element, timestamp, clickCount }, ... ]
+   * @param {Array}  deadClicks           — [ { element, timestamp }, ... ]
+   * @param {Array}  layoutShifts         — [ { timestamp, shiftValue, diffPercent, screenshotBefore, screenshotAfter, isSignificant }, ... ]
+   * @param {Object} accessibilityAudit   — { score, totalViolations, criticalViolations, seriousViolations, moderateViolations }
    */
   constructor(
-    metricsLog,
-    complianceLog,
-    uxLog,
-    errorLog,
-    coreWebVitals,
-    longTasks,
-    memorySnapshots,
-    traceFilePath,
-    reportsDir,
-    fhirViolations,
-    phiStorageFlags,
-    phiUnencryptedTransmissions,
-    jciViolations,
-    autoLogoffViolations,
-    longestInactivity,
-    autoLogoffTimeoutMs
+    metricsLog, complianceLog, uxLog, errorLog,
+    coreWebVitals, longTasks, memorySnapshots, traceFilePath, reportsDir,
+    fhirViolations, phiStorageFlags, phiUnencryptedTransmissions,
+    jciViolations, autoLogoffViolations, longestInactivity, autoLogoffTimeoutMs,
+    rageClicks, deadClicks, layoutShifts, accessibilityAudit
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -56,6 +49,12 @@ class ReportAggregator {
     this.autoLogoffViolations = autoLogoffViolations || [];
     this.longestInactivity = longestInactivity || 0;
     this.autoLogoffTimeoutMs = autoLogoffTimeoutMs || 900000;
+
+    // Pillar 3 — UX & Accessibility
+    this.rageClicks = rageClicks || [];
+    this.deadClicks = deadClicks || [];
+    this.layoutShifts = layoutShifts || [];
+    this.accessibilityAudit = accessibilityAudit || { score: null, totalViolations: 0, criticalViolations: [], seriousViolations: [], moderateViolations: [] };
   }
 
   /**
@@ -113,7 +112,6 @@ class ReportAggregator {
           LCP: this.coreWebVitals.LCP || null,
           CLS: this.coreWebVitals.CLS || null,
         },
-
         longTasks: {
           total: this.longTasks.length,
           tasks: this.longTasks.slice(-100).map(t => ({
@@ -123,7 +121,6 @@ class ReportAggregator {
             url: t.currentURL || '',
           })),
         },
-
         memorySnapshots: {
           totalSnapshots: this.memorySnapshots.length,
           leakWarnings: this._countLeakWarnings(),
@@ -133,16 +130,12 @@ class ReportAggregator {
           snapshots: this.memorySnapshots.slice(-50).map(s => ({
             timestamp: s.timestamp,
             processes: s.processes.map(p => ({
-              type: p.processType,
-              pid: p.pid,
-              privateMemoryMB: p.privateMemory,
-              workingSetMB: p.workingSet,
-              cpuPercent: p.cpuPercent,
-              flag: p.flag,
+              type: p.processType, pid: p.pid,
+              privateMemoryMB: p.privateMemory, workingSetMB: p.workingSet,
+              cpuPercent: p.cpuPercent, flag: p.flag,
             })),
           })),
         },
-
         traceFilePath: this.traceFilePath,
       },
 
@@ -153,46 +146,30 @@ class ReportAggregator {
         fhirValidation: {
           totalViolations: this.fhirViolations.length,
           violations: this.fhirViolations.slice(-100).map(v => ({
-            url: v.url,
-            timestamp: v.timestamp,
-            errorType: v.errorType,
-            errorDetails: v.errorDetails,
+            url: v.url, timestamp: v.timestamp, errorType: v.errorType, errorDetails: v.errorDetails,
           })),
           summary: this._summarizeFHIRViolations(),
         },
-
         phiStorageScan: {
           totalFlags: this.phiStorageFlags.length,
           flags: this.phiStorageFlags.slice(-100).map(f => ({
-            key: f.key,
-            pattern: f.pattern,
-            store: f.store,
-            timestamp: f.timestamp,
+            key: f.key, pattern: f.pattern, store: f.store, timestamp: f.timestamp,
           })),
           byPattern: this._groupByPHIPattern(),
           byStore: this._groupByPHIStore(),
         },
-
         unencryptedTransmissions: {
           total: this.phiUnencryptedTransmissions.length,
           transmissions: this.phiUnencryptedTransmissions.slice(-100).map(t => ({
-            url: t.url,
-            timestamp: t.timestamp,
-            statusCode: t.statusCode,
-            resourceType: t.resourceType,
+            url: t.url, timestamp: t.timestamp, statusCode: t.statusCode, resourceType: t.resourceType,
           })),
         },
-
         jciIpsg1: {
           totalViolations: this.jciViolations.length,
           violations: this.jciViolations.slice(-100).map(v => ({
-            url: v.url,
-            timestamp: v.timestamp,
-            identifiersFound: v.identifiersFound,
-            identifierTypes: v.identifierTypes,
+            url: v.url, timestamp: v.timestamp, identifiersFound: v.identifiersFound, identifierTypes: v.identifierTypes,
           })),
         },
-
         autoLogoffAudit: {
           limitMinutes: this.autoLogoffTimeoutMs / 60000,
           totalViolations: this.autoLogoffViolations.length,
@@ -202,6 +179,67 @@ class ReportAggregator {
             effectiveInactiveMinutes: Math.round(v.effectiveInactiveMs / 60000),
             timestamp: v.timestamp,
           })),
+        },
+      },
+
+      // ════════════════════════════════════════
+      //  UX & Accessibility Section (Pillar 3)
+      // ════════════════════════════════════════
+      uxAndAccessibility: {
+        rageClicks: {
+          total: this.rageClicks.length,
+          clicks: this.rageClicks.slice(-100).map(c => ({
+            x: c.x, y: c.y,
+            element: c.element || null,
+            timestamp: c.timestamp,
+            clickCount: c.clickCount,
+          })),
+        },
+
+        deadClicks: {
+          total: this.deadClicks.length,
+          clicks: this.deadClicks.slice(-100).map(c => ({
+            element: c.element || null,
+            timestamp: c.timestamp,
+          })),
+        },
+
+        layoutShifts: {
+          total: this.layoutShifts.length,
+          significantCount: this.layoutShifts.filter(s => s.isSignificant).length,
+          shifts: this.layoutShifts.slice(-50).map(s => ({
+            timestamp: s.timestamp,
+            shiftValue: s.shiftValue,
+            diffPercent: s.diffPercent,
+            isSignificant: s.isSignificant,
+            screenshotBefore: s.screenshotBefore || null,
+            screenshotAfter: s.screenshotAfter || null,
+          })),
+        },
+
+        accessibilityAudit: {
+          score: this.accessibilityAudit.score,
+          totalViolations: this.accessibilityAudit.totalViolations,
+          critical: {
+            count: (this.accessibilityAudit.criticalViolations || []).length,
+            violations: (this.accessibilityAudit.criticalViolations || []).slice(-20).map(v => ({
+              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+            })),
+          },
+          serious: {
+            count: (this.accessibilityAudit.seriousViolations || []).length,
+            violations: (this.accessibilityAudit.seriousViolations || []).slice(-20).map(v => ({
+              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+            })),
+          },
+          moderate: {
+            count: (this.accessibilityAudit.moderateViolations || []).length,
+            violations: (this.accessibilityAudit.moderateViolations || []).slice(-20).map(v => ({
+              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+            })),
+          },
+          url: this.accessibilityAudit.url || null,
+          timestamp: this.accessibilityAudit.timestamp || null,
         },
       },
     };
@@ -230,21 +268,17 @@ class ReportAggregator {
 
   _summarizeMetrics() {
     if (this.metrics.length === 0) return { status: 'no_data' };
-
     const byTag = {};
     for (const m of this.metrics) {
       if (!byTag[m.tag]) byTag[m.tag] = [];
       byTag[m.tag].push(m.value);
     }
-
     const summary = {};
     for (const [tag, values] of Object.entries(byTag)) {
       const numeric = values.filter(v => typeof v === 'number');
       summary[tag] = {
         count: values.length,
-        avg: numeric.length > 0
-          ? (numeric.reduce((a, b) => a + b, 0) / numeric.length).toFixed(2)
-          : null,
+        avg: numeric.length > 0 ? (numeric.reduce((a, b) => a + b, 0) / numeric.length).toFixed(2) : null,
         min: numeric.length > 0 ? Math.min(...numeric) : null,
         max: numeric.length > 0 ? Math.max(...numeric) : null,
       };
@@ -256,12 +290,7 @@ class ReportAggregator {
     const passed = this.compliance.filter(c => c.passed).length;
     const failed = this.compliance.filter(c => !c.passed).length;
     const total = this.compliance.length;
-    return {
-      total,
-      passed,
-      failed,
-      passRate: total > 0 ? ((passed / total) * 100).toFixed(1) + '%' : 'N/A',
-    };
+    return { total, passed, failed, passRate: total > 0 ? ((passed / total) * 100).toFixed(1) + '%' : 'N/A' };
   }
 
   _groupByStandard() {
@@ -283,9 +312,7 @@ class ReportAggregator {
     const scores = this.ux.filter(u => typeof u.score === 'number').map(u => u.score);
     return {
       totalChecks: this.ux.length,
-      avgScore: scores.length > 0
-        ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)
-        : null,
+      avgScore: scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : null,
       minScore: scores.length > 0 ? Math.min(...scores) : null,
       maxScore: scores.length > 0 ? Math.max(...scores) : null,
     };
@@ -300,8 +327,7 @@ class ReportAggregator {
     }
     for (const [key, val] of Object.entries(groups)) {
       val.avgScore = val.scores.length > 0
-        ? (val.scores.reduce((a, b) => a + b, 0) / val.scores.length).toFixed(1)
-        : null;
+        ? (val.scores.reduce((a, b) => a + b, 0) / val.scores.length).toFixed(1) : null;
       delete val.scores;
     }
     return groups;
@@ -320,17 +346,12 @@ class ReportAggregator {
 
   _groupByErrorSource() {
     const groups = {};
-    for (const e of this.errors) {
-      groups[e.source] = (groups[e.source] || 0) + 1;
-    }
+    for (const e of this.errors) { groups[e.source] = (groups[e.source] || 0) + 1; }
     return groups;
   }
 
-  // ── FHIR-specific helpers ──
-
   _summarizeFHIRViolations() {
     if (this.fhirViolations.length === 0) return { status: 'no_violations' };
-
     const byType = {};
     for (const v of this.fhirViolations) {
       const t = v.errorType || 'UNKNOWN';
