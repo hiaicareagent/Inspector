@@ -68,6 +68,12 @@ const autoLogoffViolations = [];
 let lastInteractionTimestamp = null;
 let longestInactivity = 0;
 
+// ── Telemetry-specific stores (Pillar 4) ──
+const consoleErrors = [];
+const consoleWarnings = [];
+const rendererCrashes = [];
+let sessionStartTime = new Date().toISOString();
+
 // ── UX-specific stores (Pillar 3) ──
 const rageClicks = [];
 const deadClicks = [];
@@ -132,6 +138,67 @@ function createMainWindow() {
   });
 
   mainWindow.loadURL(TARGET_URL);
+
+  // ── Telemetry: console-message interception ──
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const entry = {
+      level,
+      message: message.substring(0, 2000),
+      sourceURL: sourceId || '',
+      lineNumber: line,
+      currentURL: mainWindow ? mainWindow.webContents.getURL() : '',
+      timestamp: new Date().toISOString(),
+    };
+
+    if (level >= 3) {  // ERROR
+      entry.category = 'CONSOLE_ERROR';
+      consoleErrors.push(entry);
+      errorLog.push({
+        source: sourceId || 'console',
+        message: `[CONSOLE_ERROR] ${message}`,
+        stack: `Line ${line}`,
+        timestamp: entry.timestamp,
+      });
+    } else if (level === 2) {  // WARNING
+      entry.category = 'CONSOLE_WARNING';
+      consoleWarnings.push(entry);
+    }
+  });
+
+  // ── Telemetry: renderer crash / unresponsive ──
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    const entry = {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      type: 'RENDERER_CRASH',
+      currentURL: mainWindow ? mainWindow.webContents.getURL() : '',
+      timestamp: new Date().toISOString(),
+    };
+    rendererCrashes.push(entry);
+    errorLog.push({
+      source: 'renderer',
+      message: `RENDERER_CRASH: ${details.reason} (exit code ${details.exitCode})`,
+      stack: details.reason,
+      timestamp: entry.timestamp,
+    });
+    console.error(`[Inspector:Telemetry] ⚠ RENDERER_CRASH: ${details.reason} (exit code ${details.exitCode})`);
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    const entry = {
+      type: 'RENDERER_UNRESPONSIVE',
+      currentURL: mainWindow ? mainWindow.webContents.getURL() : '',
+      timestamp: new Date().toISOString(),
+    };
+    rendererCrashes.push(entry);
+    errorLog.push({
+      source: 'renderer',
+      message: 'RENDERER_UNRESPONSIVE: The renderer process is not responding',
+      stack: '',
+      timestamp: entry.timestamp,
+    });
+    console.error('[Inspector:Telemetry] ⚠ RENDERER_UNRESPONSIVE');
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -1146,7 +1213,10 @@ function setupIPC() {
         fhirViolations, phiStorageFlags, phiUnencryptedTransmissions,
         jciIpsg1Violations, autoLogoffViolations, longestInactivity, AUTOLOGOFF_TIMEOUT_MS,
         // Pillar 3
-        rageClicks, deadClicks, layoutShifts, accessibilityAudit
+        rageClicks, deadClicks, layoutShifts, accessibilityAudit,
+        // Pillar 4
+        consoleErrors, consoleWarnings, rendererCrashes,
+        sessionStartTime, process.versions.electron, TARGET_URL
       );
       const filePath = aggregator.generateReport();
       return { success: true, filePath };
@@ -1176,11 +1246,70 @@ function setupIPC() {
     };
   });
 
+  ipcMain.handle('inspector:getTelemetryCounts', async () => {
+    return {
+      consoleErrors: consoleErrors.length,
+      consoleWarnings: consoleWarnings.length,
+      rendererCrashes: rendererCrashes.length,
+    };
+  });
+
+  ipcMain.handle('inspector:getSummaryScores', async () => {
+    const complianceScore = _computeComplianceScore();
+    const uxScore = _computeUXScore();
+    const perfScore = _computePerformanceScore();
+    return { complianceScore, uxScore, performanceScore: perfScore };
+  });
+
   // ── Window controls ──
 
   ipcMain.on('window:minimize', () => { if (mainWindow) mainWindow.minimize(); });
   ipcMain.on('window:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
   ipcMain.on('window:close', () => { if (mainWindow) mainWindow.close(); });
+}
+
+// ──────────────────────────────────────────────
+// Scoring helpers
+// ──────────────────────────────────────────────
+
+function _computeComplianceScore() {
+  let score = 100;
+  score -= fhirViolations.length * 20;
+  score -= phiStorageFlags.length * 30;
+  score -= jciIpsg1Violations.length * 25;
+  score -= phiUnencryptedTransmissions.length * 30;
+  score -= autoLogoffViolations.length * 20;
+  return Math.max(0, Math.min(100, score));
+}
+
+function _computeUXScore() {
+  let score = 100;
+  score -= rageClicks.length * 10;
+  score -= deadClicks.length * 5;
+  score -= layoutShifts.filter(s => s.isSignificant).length * 15;
+  score -= (accessibilityAudit.criticalViolations || []).length * 10;
+  score -= (accessibilityAudit.seriousViolations || []).length * 5;
+  return Math.max(0, Math.min(100, score));
+}
+
+function _computePerformanceScore() {
+  let score = 100;
+  // LCP > 2500ms
+  if (performanceCoreWebVitals.LCP && performanceCoreWebVitals.LCP.value > 2500) {
+    score -= 10;
+  }
+  // Long tasks > 100ms
+  const longSlowTasks = performanceLongTasks.filter(t => t.duration > 100);
+  score -= longSlowTasks.length * 5;
+  // Memory leak warnings
+  let memoryLeakCount = 0;
+  for (const snap of performanceMemorySnapshots) {
+    for (const proc of snap.processes) {
+      if (proc.flag === 'MEMORY_LEAK_WARNING') memoryLeakCount++;
+    }
+  }
+  score -= memoryLeakCount * 15;
+  return Math.max(0, Math.min(100, score));
 }
 
 // ──────────────────────────────────────────────
@@ -1192,6 +1321,7 @@ app.whenReady().then(() => {
   loadFHIRSchema();
   setupIPC();
   createMainWindow();
+  sessionStartTime = new Date().toISOString();
 
   startMemoryMonitoring();
   startTrace();

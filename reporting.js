@@ -19,17 +19,25 @@ class ReportAggregator {
    * @param {Array}  autoLogoffViolations
    * @param {number} longestInactivity
    * @param {number} autoLogoffTimeoutMs
-   * @param {Array}  rageClicks           — [ { x, y, element, timestamp, clickCount }, ... ]
-   * @param {Array}  deadClicks           — [ { element, timestamp }, ... ]
-   * @param {Array}  layoutShifts         — [ { timestamp, shiftValue, diffPercent, screenshotBefore, screenshotAfter, isSignificant }, ... ]
-   * @param {Object} accessibilityAudit   — { score, totalViolations, criticalViolations, seriousViolations, moderateViolations }
+   * @param {Array}  rageClicks
+   * @param {Array}  deadClicks
+   * @param {Array}  layoutShifts
+   * @param {Object} accessibilityAudit
+   * @param {Array}  consoleErrors       — [ { level, message, sourceURL, lineNumber, currentURL, timestamp, category }, ... ]
+   * @param {Array}  consoleWarnings     — same shape as consoleErrors
+   * @param {Array}  rendererCrashes     — [ { reason, exitCode, type, currentURL, timestamp }, ... ]
+   * @param {string} sessionStartTime
+   * @param {string} electronVersion
+   * @param {string} targetUrl
    */
   constructor(
     metricsLog, complianceLog, uxLog, errorLog,
     coreWebVitals, longTasks, memorySnapshots, traceFilePath, reportsDir,
     fhirViolations, phiStorageFlags, phiUnencryptedTransmissions,
     jciViolations, autoLogoffViolations, longestInactivity, autoLogoffTimeoutMs,
-    rageClicks, deadClicks, layoutShifts, accessibilityAudit
+    rageClicks, deadClicks, layoutShifts, accessibilityAudit,
+    consoleErrors, consoleWarnings, rendererCrashes,
+    sessionStartTime, electronVersion, targetUrl
   ) {
     this.metrics = metricsLog;
     this.compliance = complianceLog;
@@ -41,7 +49,6 @@ class ReportAggregator {
     this.traceFilePath = traceFilePath || null;
     this.reportsDir = reportsDir;
 
-    // Pillar 2 — Clinical Compliance
     this.fhirViolations = fhirViolations || [];
     this.phiStorageFlags = phiStorageFlags || [];
     this.phiUnencryptedTransmissions = phiUnencryptedTransmissions || [];
@@ -50,29 +57,125 @@ class ReportAggregator {
     this.longestInactivity = longestInactivity || 0;
     this.autoLogoffTimeoutMs = autoLogoffTimeoutMs || 900000;
 
-    // Pillar 3 — UX & Accessibility
     this.rageClicks = rageClicks || [];
     this.deadClicks = deadClicks || [];
     this.layoutShifts = layoutShifts || [];
     this.accessibilityAudit = accessibilityAudit || { score: null, totalViolations: 0, criticalViolations: [], seriousViolations: [], moderateViolations: [] };
+
+    // Pillar 4 — Telemetry
+    this.consoleErrors = consoleErrors || [];
+    this.consoleWarnings = consoleWarnings || [];
+    this.rendererCrashes = rendererCrashes || [];
+    this.sessionStartTime = sessionStartTime || new Date().toISOString();
+    this.electronVersion = electronVersion || process.versions.electron;
+    this.targetUrl = targetUrl || '';
   }
 
-  /**
-   * Generate a structured JSON report file in /reports
-   * @returns {string} The absolute path to the generated report file
-   */
+  /** ─── Compute Scores ─── */
+
+  _calcComplianceScore() {
+    let s = 100;
+    s -= this.fhirViolations.length * 20;
+    s -= this.phiStorageFlags.length * 30;
+    s -= this.jciViolations.length * 25;
+    s -= this.phiUnencryptedTransmissions.length * 30;
+    s -= this.autoLogoffViolations.length * 20;
+    return Math.max(0, Math.min(100, s));
+  }
+
+  _calcUXScore() {
+    let s = 100;
+    s -= this.rageClicks.length * 10;
+    s -= this.deadClicks.length * 5;
+    s -= this.layoutShifts.filter(x => x.isSignificant).length * 15;
+    s -= (this.accessibilityAudit.criticalViolations || []).length * 10;
+    s -= (this.accessibilityAudit.seriousViolations || []).length * 5;
+    return Math.max(0, Math.min(100, s));
+  }
+
+  _calcPerformanceScore() {
+    let s = 100;
+    if (this.coreWebVitals.LCP && this.coreWebVitals.LCP.value > 2500) s -= 10;
+    const slowTasks = this.longTasks.filter(t => t.duration > 100);
+    s -= slowTasks.length * 5;
+    let memWarnings = 0;
+    for (const snap of this.memorySnapshots) {
+      for (const proc of snap.processes) {
+        if (proc.flag === 'MEMORY_LEAK_WARNING') memWarnings++;
+      }
+    }
+    s -= memWarnings * 15;
+    return Math.max(0, Math.min(100, s));
+  }
+
+  _extractCriticalFlags() {
+    const flags = [];
+    for (const v of this.fhirViolations) {
+      if (v.errorType === 'INVALID_JSON' || v.errorType === 'MISSING_RESOURCE_TYPE') {
+        flags.push({ severity: 'critical', type: v.errorType, message: v.errorDetails, timestamp: v.timestamp });
+      }
+    }
+    for (const p of this.phiStorageFlags) {
+      flags.push({ severity: 'critical', type: 'PHI_IN_STORAGE', message: `${p.pattern} found in ${p.store}`, timestamp: p.timestamp });
+    }
+    for (const t of this.phiUnencryptedTransmissions) {
+      flags.push({ severity: 'critical', type: 'PHI_UNENCRYPTED', message: `Unencrypted PHI: ${t.url}`, timestamp: t.timestamp });
+    }
+    for (const j of this.jciViolations) {
+      flags.push({ severity: 'critical', type: 'JCI_IPSG1', message: `Only ${j.identifiersFound} patient identifiers visible`, timestamp: j.timestamp });
+    }
+    for (const a of this.autoLogoffViolations) {
+      flags.push({ severity: 'warning', type: 'AUTOLOGOFF_FAILURE', message: `Inactive ${Math.round(a.effectiveInactiveMs/60000)}min`, timestamp: a.timestamp });
+    }
+    for (const s of this.layoutShifts) {
+      if (s.isSignificant) {
+        flags.push({ severity: 'warning', type: 'SIGNIFICANT_LAYOUT_SHIFT', message: `${s.diffPercent}% visual change`, timestamp: s.timestamp });
+      }
+    }
+    for (const conErr of this.consoleErrors) {
+      flags.push({ severity: 'warning', type: 'CONSOLE_ERROR', message: conErr.message.substring(0, 200), timestamp: conErr.timestamp });
+    }
+    for (const c of this.rendererCrashes) {
+      flags.push({ severity: 'critical', type: c.type, message: c.reason || 'Unresponsive', timestamp: c.timestamp });
+    }
+    // Deduplicate by type+message
+    const seen = new Set();
+    return flags.filter(f => {
+      const key = f.type + '|' + f.message;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 50);
+  }
+
+  /** ─── Generate Unified Report ─── */
+
   generateReport() {
     const now = new Date();
     const timestamp = now.toISOString().replace(/[:.]/g, '-');
     const filename = `inspector-report-${timestamp}.json`;
     const filePath = path.join(this.reportsDir, filename);
 
+    const sessionDurationMs = new Date() - new Date(this.sessionStartTime);
+    const sessionMinutes = Math.floor(sessionDurationMs / 60000);
+    const sessionSeconds = Math.floor((sessionDurationMs % 60000) / 1000);
+
+    const complianceScore = this._calcComplianceScore();
+    const uxScore = this._calcUXScore();
+    const performanceScore = this._calcPerformanceScore();
+    const criticalFlags = this._extractCriticalFlags();
+
     const report = {
       meta: {
         title: 'Inspector — HIS/EMR Observability Report',
-        version: '2.0.0',
+        version: '4.0.0',
         generatedAt: now.toISOString(),
         generatedAtFormatted: now.toLocaleString(),
+        sessionStartTime: this.sessionStartTime,
+        sessionDuration: `${sessionMinutes}m ${sessionSeconds}s`,
+        sessionDurationMs,
+        electronVersion: this.electronVersion,
+        targetURL: this.targetUrl,
         engine: 'Inspector Healthcare Browser (Electron/Chromium)',
         totalMetrics: this.metrics.length,
         totalComplianceChecks: this.compliance.length,
@@ -80,33 +183,25 @@ class ReportAggregator {
         totalErrors: this.errors.length,
       },
 
-      metrics: {
-        summary: this._summarizeMetrics(),
-        log: this.metrics.slice(-500),
-      },
-
-      compliance: {
-        summary: this._summarizeCompliance(),
-        byStandard: this._groupByStandard(),
-        log: this.compliance.slice(-500),
-      },
-
-      ux: {
-        summary: this._summarizeUX(),
-        byCategory: this._groupByUXCategory(),
-        log: this.ux.slice(-500),
-      },
-
-      errors: {
-        summary: this._summarizeErrors(),
-        bySource: this._groupByErrorSource(),
-        log: this.errors.slice(-200),
+      // ════════════════════════════════════════
+      // Summary (Unified Scoring)
+      // ════════════════════════════════════════
+      summary: {
+        scores: {
+          compliance: { value: complianceScore, label: 'Compliance Score', color: complianceScore >= 80 ? 'green' : complianceScore >= 50 ? 'amber' : 'red' },
+          ux: { value: uxScore, label: 'UX Score', color: uxScore >= 80 ? 'green' : uxScore >= 50 ? 'amber' : 'red' },
+          performance: { value: performanceScore, label: 'Performance Score', color: performanceScore >= 80 ? 'green' : performanceScore >= 50 ? 'amber' : 'red' },
+        },
+        overall: Math.round((complianceScore + uxScore + performanceScore) / 3),
+        totalIssues: criticalFlags.length,
+        criticalFlags,
       },
 
       // ════════════════════════════════════════
-      //  Performance Section (Pillar 1)
+      // Performance Section (Pillar 1)
       // ════════════════════════════════════════
       performance: {
+        score: performanceScore,
         coreWebVitals: {
           FCP: this.coreWebVitals.FCP || null,
           LCP: this.coreWebVitals.LCP || null,
@@ -125,8 +220,7 @@ class ReportAggregator {
           totalSnapshots: this.memorySnapshots.length,
           leakWarnings: this._countLeakWarnings(),
           latestSnapshot: this.memorySnapshots.length > 0
-            ? this.memorySnapshots[this.memorySnapshots.length - 1]
-            : null,
+            ? this.memorySnapshots[this.memorySnapshots.length - 1] : null,
           snapshots: this.memorySnapshots.slice(-50).map(s => ({
             timestamp: s.timestamp,
             processes: s.processes.map(p => ({
@@ -140,9 +234,13 @@ class ReportAggregator {
       },
 
       // ════════════════════════════════════════
-      //  Clinical Compliance Section (Pillar 2)
+      // Clinical Compliance Section (Pillar 2)
       // ════════════════════════════════════════
-      clinicalCompliance: {
+      compliance: {
+        score: complianceScore,
+        summary: this._summarizeCompliance(),
+        byStandard: this._groupByStandard(),
+        log: this.compliance.slice(-500),
         fhirValidation: {
           totalViolations: this.fhirViolations.length,
           violations: this.fhirViolations.slice(-100).map(v => ({
@@ -183,74 +281,101 @@ class ReportAggregator {
       },
 
       // ════════════════════════════════════════
-      //  UX & Accessibility Section (Pillar 3)
+      // UX & Accessibility Section (Pillar 3)
       // ════════════════════════════════════════
-      uxAndAccessibility: {
+      ux: {
+        score: uxScore,
+        summary: this._summarizeUX(),
+        byCategory: this._groupByUXCategory(),
+        log: this.ux.slice(-500),
         rageClicks: {
           total: this.rageClicks.length,
           clicks: this.rageClicks.slice(-100).map(c => ({
-            x: c.x, y: c.y,
-            element: c.element || null,
-            timestamp: c.timestamp,
-            clickCount: c.clickCount,
+            x: c.x, y: c.y, element: c.element || null,
+            timestamp: c.timestamp, clickCount: c.clickCount,
           })),
         },
-
         deadClicks: {
           total: this.deadClicks.length,
           clicks: this.deadClicks.slice(-100).map(c => ({
-            element: c.element || null,
-            timestamp: c.timestamp,
+            element: c.element || null, timestamp: c.timestamp,
           })),
         },
-
         layoutShifts: {
           total: this.layoutShifts.length,
           significantCount: this.layoutShifts.filter(s => s.isSignificant).length,
           shifts: this.layoutShifts.slice(-50).map(s => ({
-            timestamp: s.timestamp,
-            shiftValue: s.shiftValue,
-            diffPercent: s.diffPercent,
-            isSignificant: s.isSignificant,
+            timestamp: s.timestamp, shiftValue: s.shiftValue,
+            diffPercent: s.diffPercent, isSignificant: s.isSignificant,
             screenshotBefore: s.screenshotBefore || null,
             screenshotAfter: s.screenshotAfter || null,
           })),
         },
-
         accessibilityAudit: {
           score: this.accessibilityAudit.score,
           totalViolations: this.accessibilityAudit.totalViolations,
           critical: {
             count: (this.accessibilityAudit.criticalViolations || []).length,
             violations: (this.accessibilityAudit.criticalViolations || []).slice(-20).map(v => ({
-              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+              id: v.id, impact: v.impact, description: v.description,
+              help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
             })),
           },
           serious: {
             count: (this.accessibilityAudit.seriousViolations || []).length,
             violations: (this.accessibilityAudit.seriousViolations || []).slice(-20).map(v => ({
-              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+              id: v.id, impact: v.impact, description: v.description,
+              help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
             })),
           },
           moderate: {
             count: (this.accessibilityAudit.moderateViolations || []).length,
             violations: (this.accessibilityAudit.moderateViolations || []).slice(-20).map(v => ({
-              id: v.id, impact: v.impact, description: v.description, help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
+              id: v.id, impact: v.impact, description: v.description,
+              help: v.help, helpUrl: v.helpUrl, nodes: v.nodes,
             })),
           },
           url: this.accessibilityAudit.url || null,
           timestamp: this.accessibilityAudit.timestamp || null,
         },
       },
+
+      // ════════════════════════════════════════
+      // Telemetry Section (Pillar 4)
+      // ════════════════════════════════════════
+      telemetry: {
+        consoleErrors: {
+          total: this.consoleErrors.length,
+          entries: this.consoleErrors.slice(-200).map(e => ({
+            level: e.level, message: e.message.substring(0, 500),
+            sourceURL: e.sourceURL, lineNumber: e.lineNumber,
+            currentURL: e.currentURL, timestamp: e.timestamp,
+          })),
+        },
+        consoleWarnings: {
+          total: this.consoleWarnings.length,
+          entries: this.consoleWarnings.slice(-200).map(e => ({
+            level: e.level, message: e.message.substring(0, 500),
+            sourceURL: e.sourceURL, lineNumber: e.lineNumber,
+            currentURL: e.currentURL, timestamp: e.timestamp,
+          })),
+        },
+        rendererCrashes: {
+          total: this.rendererCrashes.length,
+          entries: this.rendererCrashes.map(e => ({
+            type: e.type, reason: e.reason || null,
+            exitCode: e.exitCode || null,
+            currentURL: e.currentURL, timestamp: e.timestamp,
+          })),
+        },
+      },
     };
 
     const dir = this.reportsDir;
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
 
     fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf-8');
-    console.log(`[ReportAggregator] Report saved: ${filePath}`);
+    console.log(`[ReportAggregator] Unified report saved: ${filePath}`);
     return filePath;
   }
 
@@ -259,9 +384,7 @@ class ReportAggregator {
   _countLeakWarnings() {
     let count = 0;
     for (const snap of this.memorySnapshots) {
-      for (const proc of snap.processes) {
-        if (proc.flag === 'MEMORY_LEAK_WARNING') count++;
-      }
+      for (const proc of snap.processes) { if (proc.flag === 'MEMORY_LEAK_WARNING') count++; }
     }
     return count;
   }
@@ -336,11 +459,7 @@ class ReportAggregator {
   _summarizeErrors() {
     return {
       total: this.errors.length,
-      bySeverity: {
-        error: this.errors.filter(e => e.message.toLowerCase().includes('error')).length,
-        warning: this.errors.filter(e => e.message.toLowerCase().includes('warn')).length,
-        other: this.errors.length,
-      },
+      bySource: this._groupByErrorSource(),
     };
   }
 
@@ -363,21 +482,13 @@ class ReportAggregator {
 
   _groupByPHIPattern() {
     const groups = {};
-    for (const f of this.phiStorageFlags) {
-      const p = f.pattern || 'UNKNOWN';
-      if (!groups[p]) groups[p] = 0;
-      groups[p]++;
-    }
+    for (const f of this.phiStorageFlags) { const p = f.pattern || 'UNKNOWN'; groups[p] = (groups[p] || 0) + 1; }
     return groups;
   }
 
   _groupByPHIStore() {
     const groups = {};
-    for (const f of this.phiStorageFlags) {
-      const s = f.store || 'UNKNOWN';
-      if (!groups[s]) groups[s] = 0;
-      groups[s]++;
-    }
+    for (const f of this.phiStorageFlags) { const s = f.store || 'UNKNOWN'; groups[s] = (groups[s] || 0) + 1; }
     return groups;
   }
 }

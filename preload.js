@@ -54,6 +54,14 @@ contextBridge.exposeInMainWorld('inspector', {
     return ipcRenderer.invoke('inspector:getUXCounts');
   },
 
+  getTelemetryCounts: () => {
+    return ipcRenderer.invoke('inspector:getTelemetryCounts');
+  },
+
+  getSummaryScores: () => {
+    return ipcRenderer.invoke('inspector:getSummaryScores');
+  },
+
   // ── Tracing Control (Pillar 1) ──
   startTrace: () => ipcRenderer.invoke('inspector:startTrace'),
   stopTrace: () => ipcRenderer.invoke('inspector:stopTrace'),

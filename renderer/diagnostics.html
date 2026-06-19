@@ -23,31 +23,77 @@
           </svg>
           Generate Report
         </button>
+        <button class="header-btn" id="btn-collapse-all">Collapse All</button>
         <button class="header-btn" id="btn-toggle-overlay">Toggle Overlay</button>
       </div>
     </header>
 
+    <!-- Summary Score Cards -->
+    <div class="score-row" id="score-row">
+      <div class="score-card score-red" id="score-compliance">
+        <div class="score-label">Compliance</div>
+        <div class="score-value" id="compliance-score-value">—</div>
+      </div>
+      <div class="score-card score-amber" id="score-ux">
+        <div class="score-label">UX</div>
+        <div class="score-value" id="ux-score-value">—</div>
+      </div>
+      <div class="score-card score-green" id="score-perf">
+        <div class="score-label">Performance</div>
+        <div class="score-value" id="perf-score-value">—</div>
+      </div>
+      <div class="score-card score-summary" id="score-overall">
+        <div class="score-label">Overall</div>
+        <div class="score-value" id="overall-score-value">—</div>
+      </div>
+    </div>
+
     <main class="main" id="main-content">
-      <!-- Metrics Section -->
-      <section class="section" id="section-metrics">
-        <div class="section-header">
+      <!-- Telemetry Section (Pillar 4) -->
+      <section class="section collapsed" id="section-telemetry">
+        <div class="section-header collapsible-header" data-target="section-telemetry">
+          <h2 class="section-title">
+            <span class="section-icon">📡</span>
+            Telemetry
+          </h2>
+          <div class="section-badges">
+            <span class="badge badge-red" id="telemetry-errors-count">0</span>
+            <span class="badge badge-amber" id="telemetry-warnings-count">0</span>
+            <span class="badge badge-red" id="telemetry-crashes-count">0</span>
+          </div>
+        </div>
+        <div class="section-body">
+          <div class="compliance-summary" id="telemetry-summary">
+            <div class="stat-card fail"><span class="stat-value" id="telemetry-errors-stat">0</span><span class="stat-label">Console Errors</span></div>
+            <div class="stat-card pass"><span class="stat-value" id="telemetry-warnings-stat">0</span><span class="stat-label">Console Warnings</span></div>
+            <div class="stat-card fail"><span class="stat-value" id="telemetry-crashes-stat">0</span><span class="stat-label">Renderer Crashes</span></div>
+          </div>
+          <div class="issue-list" id="telemetry-list">
+            <div class="empty-state">No telemetry events recorded.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Performance Section -->
+      <section class="section collapsed" id="section-perf">
+        <div class="section-header collapsible-header" data-target="section-perf">
           <h2 class="section-title">
             <span class="section-icon">📊</span>
-            Performance Metrics
+            Performance
           </h2>
-          <span class="section-count" id="metrics-count">0</span>
+          <span class="section-count" id="perf-count">0</span>
         </div>
-        <div class="section-body" id="metrics-list">
+        <div class="section-body" id="perf-list">
           <div class="empty-state">No metrics recorded yet.</div>
         </div>
       </section>
 
       <!-- Compliance Section -->
-      <section class="section" id="section-compliance">
-        <div class="section-header">
+      <section class="section collapsed" id="section-compliance">
+        <div class="section-header collapsible-header" data-target="section-compliance">
           <h2 class="section-title">
             <span class="section-icon">🛡️</span>
-            Compliance Checks
+            Compliance
           </h2>
           <span class="section-count" id="compliance-count">0</span>
         </div>
@@ -57,15 +103,15 @@
             <div class="stat-card fail"><span class="stat-value" id="compliance-failed">0</span><span class="stat-label">Failed</span></div>
             <div class="stat-card total"><span class="stat-value" id="compliance-rate">—</span><span class="stat-label">Pass Rate</span></div>
           </div>
-          <div id="compliance-list">
+          <div class="issue-list" id="compliance-list">
             <div class="empty-state">No compliance checks run yet.</div>
           </div>
         </div>
       </section>
 
       <!-- UX Section -->
-      <section class="section" id="section-ux">
-        <div class="section-header">
+      <section class="section collapsed" id="section-ux">
+        <div class="section-header collapsible-header" data-target="section-ux">
           <h2 class="section-title">
             <span class="section-icon">🎨</span>
             UX Audit
@@ -77,9 +123,9 @@
         </div>
       </section>
 
-      <!-- Error Section -->
+      <!-- Errors Section -->
       <section class="section" id="section-errors">
-        <div class="section-header">
+        <div class="section-header collapsible-header" data-target="section-errors">
           <h2 class="section-title">
             <span class="section-icon">❌</span>
             Errors
@@ -92,12 +138,17 @@
       </section>
     </main>
 
-    <!-- Status Overlay -->
+    <!-- Draggable Status Overlay -->
     <div class="overlay" id="overlay">
-      <div class="overlay-item" id="overlay-metrics">📊 0</div>
-      <div class="overlay-item" id="overlay-compliance">🛡️ 0</div>
-      <div class="overlay-item" id="overlay-ux">🎨 0</div>
-      <div class="overlay-item overlay-error" id="overlay-errors">❌ 0</div>
+      <div class="overlay-handle" id="overlay-handle">⠿</div>
+      <div class="overlay-items">
+        <div class="overlay-item overlay-score" id="overlay-overall" title="Overall Score">🎯 —</div>
+        <div class="overlay-item" id="overlay-metrics">📊 0</div>
+        <div class="overlay-item" id="overlay-compliance">🛡️ 0</div>
+        <div class="overlay-item" id="overlay-ux">🎨 0</div>
+        <div class="overlay-item overlay-error" id="overlay-errors">❌ 0</div>
+        <div class="overlay-item overlay-error" id="overlay-telemetry">📡 0</div>
+      </div>
     </div>
   </div>
 
@@ -111,19 +162,118 @@
       return d.innerHTML;
     };
 
+    let currentScores = { complianceScore: 0, uxScore: 0, performanceScore: 0 };
+
+    // ── Collapsible Sections ──
+    document.querySelectorAll('.collapsible-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const section = header.closest('.section');
+        if (section) {
+          section.classList.toggle('collapsed');
+        }
+      });
+    });
+
+    $('btn-collapse-all').addEventListener('click', () => {
+      const allCollapsed = Array.from(document.querySelectorAll('.section')).every(s => s.classList.contains('collapsed'));
+      document.querySelectorAll('.section').forEach(s => {
+        s.classList.toggle('collapsed', !allCollapsed);
+      });
+      $('btn-collapse-all').textContent = allCollapsed ? 'Expand All' : 'Collapse All';
+    });
+
+    // ── Draggable Overlay ──
+    let overlayPos = { x: window.innerWidth - 200, y: window.innerHeight - 60 };
+    let isDragging = false;
+    let dragOffset = { x: 0, y: 0 };
+
+    const overlay = $('overlay');
+    const handle = $('overlay-handle');
+
+    handle.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      dragOffset.x = e.clientX - overlay.getBoundingClientRect().left;
+      dragOffset.y = e.clientY - overlay.getBoundingClientRect().top;
+      overlay.style.cursor = 'grabbing';
+      overlay.style.transition = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const x = Math.max(0, Math.min(window.innerWidth - overlay.offsetWidth, e.clientX - dragOffset.x));
+      const y = Math.max(0, Math.min(window.innerHeight - overlay.offsetHeight, e.clientY - dragOffset.y));
+      overlay.style.left = x + 'px';
+      overlay.style.right = 'auto';
+      overlay.style.top = y + 'px';
+      overlay.style.bottom = 'auto';
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+      overlay.style.cursor = 'default';
+      overlay.style.transition = '';
+    });
+
+    // ── Get color class for score ──
+    function getScoreColor(score) {
+      if (score === null || score === undefined) return 'score-muted';
+      if (score >= 80) return 'score-green';
+      if (score >= 50) return 'score-amber';
+      return 'score-red';
+    }
+
+    function updateScoreCards() {
+      const cs = currentScores;
+      const complianceEl = $('score-compliance');
+      const uxEl = $('score-ux');
+      const perfEl = $('score-perf');
+      const overallEl = $('score-overall');
+
+      complianceEl.className = 'score-card ' + getScoreColor(cs.complianceScore);
+      uxEl.className = 'score-card ' + getScoreColor(cs.uxScore);
+      perfEl.className = 'score-card ' + getScoreColor(cs.performanceScore);
+
+      $('compliance-score-value').textContent = cs.complianceScore !== undefined ? cs.complianceScore : '—';
+      $('ux-score-value').textContent = cs.uxScore !== undefined ? cs.uxScore : '—';
+      $('perf-score-value').textContent = cs.performanceScore !== undefined ? cs.performanceScore : '—';
+
+      const overall = cs.complianceScore !== undefined && cs.uxScore !== undefined && cs.performanceScore !== undefined
+        ? Math.round((cs.complianceScore + cs.uxScore + cs.performanceScore) / 3) : '—';
+      $('overall-score-value').textContent = overall;
+      overallEl.className = 'score-card score-summary ' + (typeof overall === 'number' ? getScoreColor(overall) : '');
+      $('overlay-overall').textContent = '🎯 ' + (typeof overall === 'number' ? overall : '—');
+    }
+
+    // ── Update dashboard ──
     function updateDashboard() {
+      // Scores
+      window.inspector.getSummaryScores().then((scores) => {
+        currentScores = scores;
+        updateScoreCards();
+      }).catch(() => {});
+
+      // Log counts
       window.inspector.getLogCounts().then((counts) => {
-        $('metrics-count').textContent = counts.metrics;
+        $('perf-count').textContent = counts.metrics;
         $('compliance-count').textContent = counts.compliance;
         $('ux-count').textContent = counts.ux;
         $('errors-count').textContent = counts.errors;
-
-        // Overlay badges
         $('overlay-metrics').textContent = '📊 ' + counts.metrics;
         $('overlay-compliance').textContent = '🛡️ ' + counts.compliance;
         $('overlay-ux').textContent = '🎨 ' + counts.ux;
         $('overlay-errors').textContent = '❌ ' + counts.errors;
-      });
+      }).catch(() => {});
+
+      // Telemetry counts
+      window.inspector.getTelemetryCounts().then((t) => {
+        $('telemetry-errors-count').textContent = t.consoleErrors;
+        $('telemetry-warnings-count').textContent = t.consoleWarnings;
+        $('telemetry-crashes-count').textContent = t.rendererCrashes;
+        $('telemetry-errors-stat').textContent = t.consoleErrors;
+        $('telemetry-warnings-stat').textContent = t.consoleWarnings;
+        $('telemetry-crashes-stat').textContent = t.rendererCrashes;
+        $('overlay-telemetry').textContent = '📡 ' + (t.consoleErrors + t.consoleWarnings + t.rendererCrashes);
+      }).catch(() => {});
     }
 
     // Listen for inspector:ready
@@ -137,22 +287,31 @@
 
     // Generate Report
     $('btn-generate-report').addEventListener('click', async () => {
-      const result = await window.inspector.generateReport();
-      if (result.success) {
-        alert('Report saved to: ' + result.filePath);
-      } else {
-        alert('Report generation failed: ' + result.error);
+      const btn = $('btn-generate-report');
+      btn.textContent = 'Generating...';
+      btn.disabled = true;
+      try {
+        const result = await window.inspector.generateReport();
+        if (result.success) {
+          alert('Report saved to: ' + result.filePath);
+        } else {
+          alert('Report generation failed: ' + result.error);
+        }
+      } catch (e) {
+        alert('Report generation error: ' + e.message);
       }
+      btn.textContent = 'Generate Report';
+      btn.disabled = false;
     });
 
     // Toggle overlay
     let overlayVisible = true;
     $('btn-toggle-overlay').addEventListener('click', () => {
       overlayVisible = !overlayVisible;
-      $('overlay').style.display = overlayVisible ? 'flex' : 'none';
+      overlay.style.display = overlayVisible ? 'flex' : 'none';
     });
 
-    // Window controls (if frameless)
+    // Window controls
     document.addEventListener('keydown', (e) => {
       if (e.ctrlKey && e.key === 'q') {
         window.inspector.closeWindow();
