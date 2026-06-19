@@ -1294,6 +1294,25 @@ body {
   background: var(--bg-hover);
 }
 
+/* Slow/large resource highlighting — from PerformanceBrowser's threshold approach */
+.network-item-warn {
+  background: #d2992211;
+  border-left: 2px solid var(--accent-yellow);
+}
+
+.network-item-warn:hover {
+  background: #d2992218;
+}
+
+.network-item-critical {
+  background: #f8514911;
+  border-left: 2px solid var(--accent-red);
+}
+
+.network-item-critical:hover {
+  background: #f8514918;
+}
+
 .network-method {
   font-family: var(--font-mono);
   font-weight: 600;
@@ -1519,7 +1538,7 @@ body {
 }
 
 /* ============================================
-   Status Bar
+   Status Bar / Quick Diagnostics
    ============================================ */
 
 .status-bar {
@@ -1531,11 +1550,393 @@ body {
   justify-content: space-between;
   padding: 0 12px;
   flex-shrink: 0;
+  gap: 12px;
 }
 
-.status-left, .status-right {
+.status-left {
   font-size: 11px;
   color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
+.status-right {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+/* Quick diagnostics indicators in the center of the status bar */
+.status-diagnostics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.diag-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  white-space: nowrap;
+  min-width: 20px;
+  justify-content: center;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.diag-item.diag-secure {
+  color: var(--accent-green);
+  background: #3fb95011;
+}
+
+.diag-item.diag-insecure {
+  color: var(--accent-orange);
+  background: #f0883e11;
+}
+
+.diag-item.diag-has-errors {
+  color: var(--accent-red);
+  background: #f8514911;
+}
+
+.diag-item.diag-has-warnings {
+  color: var(--accent-yellow);
+  background: #d2992211;
+}
+
+/* ============================================
+   HTML Advisor Panel
+   ============================================ */
+
+#panel-advisor {
+  padding: 8px;
+}
+
+.advisor-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 8px;
+}
+
+.advisor-categories {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.advisor-cat-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all var(--transition-fast);
+  text-align: left;
+}
+
+.advisor-cat-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.advisor-cat-btn[data-selected="true"] {
+  border-color: var(--accent-blue);
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.advisor-cat-btn[data-selected="false"] {
+  opacity: 0.6;
+}
+
+.advisor-cat-btn[data-selected="false"]:hover {
+  opacity: 0.8;
+}
+
+.advisor-cat-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.advisor-cat-name {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.advisor-cat-check {
+  font-size: 10px;
+  color: var(--accent-blue);
+  flex-shrink: 0;
+  display: none;
+}
+
+.advisor-cat-btn[data-selected="true"] .advisor-cat-check {
+  display: inline;
+}
+
+.advisor-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.advisor-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  background: var(--accent-blue);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: white;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  transition: opacity var(--transition-fast);
+}
+
+.advisor-btn:hover {
+  opacity: 0.85;
+}
+
+.advisor-btn-secondary {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.advisor-btn-secondary:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.advisor-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+}
+
+/* Advisor Results */
+.advisor-results {
+  animation: fadeIn var(--transition-normal);
+}
+
+.advisor-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.advisor-summary-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.advisor-summary-score .score-circle-mini {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.advisor-summary-counts {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.advisor-summary-counts span {
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+/* Advisor Issues List */
+.advisor-issue-group {
+  margin-bottom: 8px;
+}
+
+.advisor-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.advisor-group-header:hover {
+  background: var(--bg-hover);
+}
+
+.advisor-group-header .advisor-group-count {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.advisor-issue {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 3px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  font-size: 11px;
+  animation: fadeIn 200ms ease;
+}
+
+.advisor-issue-severity {
+  width: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.advisor-issue-severity.severity-error {
+  background: var(--accent-red);
+}
+
+.advisor-issue-severity.severity-warning {
+  background: var(--accent-yellow);
+}
+
+.advisor-issue-severity.severity-info {
+  background: var(--accent-blue);
+}
+
+.advisor-issue-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.advisor-issue-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.advisor-issue-type {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.advisor-issue-badge {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+.advisor-issue-message {
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.advisor-issue-recommendation {
+  color: var(--accent-blue);
+  font-size: 10px;
+}
+
+.advisor-issue-details {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  word-break: break-all;
+  max-height: 60px;
+  overflow-y: auto;
+}
+
+.advisor-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.advisor-no-issues {
+  text-align: center;
+  padding: 24px;
+  color: var(--accent-green);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.advisor-error {
+  text-align: center;
+  padding: 16px;
+  color: var(--accent-red);
+  font-size: 12px;
+}
+
+/* Group severity colors */
+.advisor-group-errors .advisor-group-count {
+  color: var(--accent-red);
+  background: #f8514911;
+}
+
+.advisor-group-warnings .advisor-group-count {
+  color: var(--accent-yellow);
+  background: #d2992211;
+}
+
+.advisor-group-info .advisor-group-count {
+  color: var(--accent-blue);
+  background: #58a6ff11;
 }
 
 /* ============================================

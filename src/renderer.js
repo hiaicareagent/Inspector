@@ -24,6 +24,10 @@ class InspectorBrowser {
       urlLoading: document.getElementById('url-bar-loading'),
       statusLeft: document.getElementById('status-left'),
       statusRight: document.getElementById('status-right'),
+      diagSecurity: document.getElementById('diag-security'),
+      diagRequests: document.getElementById('diag-requests'),
+      diagConsole: document.getElementById('diag-console'),
+      diagLoadtime: document.getElementById('diag-loadtime'),
       monitorPanel: document.getElementById('monitor-panel'),
       monitorContent: document.getElementById('monitor-content'),
       panelSplitter: document.getElementById('panel-splitter'),
@@ -41,6 +45,7 @@ class InspectorBrowser {
     this.setupMonitorPanel();
     this.setupResizer();
     this.setupIPCEvents();
+    this.setupProcessMetrics();
     this._startedAt = performance.now();
   }
 
@@ -486,6 +491,96 @@ class InspectorBrowser {
     const tab = this.tabs.get(tabId);
     if (!tab) return;
     this.elements.statusLeft.textContent = tab.url || 'Ready';
+
+    // Update quick diagnostics
+    this.updateDiagnostics(tabId);
+  }
+
+  // ==========================================
+  // Quick Diagnostics (Status Bar Indicators)
+  // ==========================================
+
+  updateDiagnostics(tabId) {
+    const tab = this.tabs.get(tabId);
+    if (!tab) {
+      // Clear all diagnostics
+      this.setDiag(this.elements.diagSecurity, '');
+      this.setDiag(this.elements.diagRequests, '');
+      this.setDiag(this.elements.diagConsole, '');
+      this.setDiag(this.elements.diagLoadtime, '');
+      return;
+    }
+
+    // 1. Security indicator
+    if (tab.type === 'internal' || !tab.url || tab.url === 'about:blank') {
+      this.setDiag(this.elements.diagSecurity, '');
+    } else {
+      const isSecure = tab.url.startsWith('https://');
+      this.setDiag(this.elements.diagSecurity, isSecure ? '🔒 HTTPS' : '⚠️ HTTP', {
+        className: 'diag-item ' + (isSecure ? 'diag-secure' : 'diag-insecure'),
+        title: isSecure ? 'Connection is secure (HTTPS)' : 'Connection is not secure (HTTP)'
+      });
+    }
+
+    // 2. Network request count from monitoring data
+    const tabData = this.monitorData.get(tabId);
+    const netCount = tabData?.network?.length || 0;
+    if (netCount > 0) {
+      this.setDiag(this.elements.diagRequests, `📡 ${netCount} req`, {
+        title: `${netCount} network request(s)`
+      });
+    } else {
+      this.setDiag(this.elements.diagRequests, '');
+    }
+
+    // 3. Console messages (errors/warnings count)
+    const consoleMessages = tabData?.console || [];
+    const errors = consoleMessages.filter(m => m.level === 'error').length;
+    const warnings = consoleMessages.filter(m => m.level === 'warning').length;
+    if (errors > 0 || warnings > 0) {
+      const parts = [];
+      if (errors > 0) parts.push(`❌${errors}`);
+      if (warnings > 0) parts.push(`⚠️${warnings}`);
+      this.setDiag(this.elements.diagConsole, `📋 ${parts.join(' ')}`, {
+        className: 'diag-item ' + (errors > 0 ? 'diag-has-errors' : 'diag-has-warnings'),
+        title: `${errors} error(s), ${warnings} warning(s)`
+      });
+    } else if (consoleMessages.length > 0) {
+      this.setDiag(this.elements.diagConsole, `📋 ${consoleMessages.length} msgs`, {
+        title: `${consoleMessages.length} console message(s), no errors`
+      });
+    } else {
+      this.setDiag(this.elements.diagConsole, '');
+    }
+
+    // 4. Page load time from performance data
+    const perfData = tabData?.performance;
+    const loadTime = perfData?.navigation?.loadComplete;
+    if (loadTime) {
+      const seconds = (loadTime / 1000).toFixed(2);
+      const cls = loadTime < 2000 ? 'diag-secure' : loadTime < 4000 ? 'diag-has-warnings' : 'diag-has-errors';
+      this.setDiag(this.elements.diagLoadtime, `⏱ ${seconds}s`, {
+        className: `diag-item ${cls}`,
+        title: `Page loaded in ${seconds}s`
+      });
+    } else {
+      this.setDiag(this.elements.diagLoadtime, '');
+    }
+  }
+
+  setDiag(el, text, opts = {}) {
+    if (!el) return;
+    if (text) {
+      el.textContent = text;
+      el.style.display = 'inline-flex';
+      if (opts.className) el.className = opts.className;
+      if (opts.title) el.title = opts.title;
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+      el.className = 'diag-item';
+      el.title = '';
+    }
   }
 
   // ==========================================
@@ -622,6 +717,9 @@ class InspectorBrowser {
       this.exportReport();
     });
 
+    // HTML Advisor - category toggle buttons
+    this.setupHtmlAdvisorUI();
+
     // Close button inside monitor panel toolbar
     const closeBtn = document.getElementById('monitor-close');
     if (closeBtn) {
@@ -689,10 +787,893 @@ class InspectorBrowser {
   }
 
   // ==========================================
-  // IPC Event Listeners
+  // Process Metrics (Live Browser Health)
   // ==========================================
 
-  setupIPCEvents() {
+  setupProcessMetrics() {
+    // Clear any previous timer (defensive, in case init runs again)
+    if (this._processMetricsTimer) {
+      clearInterval(this._processMetricsTimer);
+    }
+
+    this._processMetricsTimer = setInterval(() => {
+      this.pollProcessMetrics();
+    }, 2000);
+
+    // Poll immediately on startup
+    this.pollProcessMetrics();
+  }
+
+  async pollProcessMetrics() {
+    try {
+      const info = await window.electronAPI.getProcessInfo();
+      if (!info) return;
+
+      this._lastProcessMetrics = info;
+
+      // Update status bar right side
+      const memMB = (info.memory.residentSet / (1024 * 1024)).toFixed(0);
+      const cpuPct = info.cpu.percentCPUUsage.toFixed(1);
+      this.elements.statusRight.textContent = `🧠 ${memMB} MB  ⚡ ${cpuPct}% CPU`;
+
+      // If the performance panel is showing these metrics, re-render it
+      const perfPanel = document.getElementById('panel-performance');
+      if (perfPanel && perfPanel.classList.contains('active') && this._lastProcessMetrics) {
+        this.renderProcessHealthCard();
+      }
+    } catch (e) {
+      // Metrics unavailable
+    }
+  }
+
+  // ==========================================
+  // HTML Advisor - Comprehensive Page Audit
+  // ==========================================
+
+  setupHtmlAdvisorUI() {
+    // Category toggle buttons
+    document.querySelectorAll('.advisor-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const isSelected = btn.dataset.selected === 'true';
+        btn.dataset.selected = isSelected ? 'false' : 'true';
+      });
+    });
+
+    // Run selected
+    document.getElementById('advisor-run-all').addEventListener('click', () => {
+      this.runHtmlAdvisor();
+    });
+
+    // Select all
+    document.getElementById('advisor-select-all').addEventListener('click', () => {
+      document.querySelectorAll('.advisor-cat-btn').forEach(b => { b.dataset.selected = 'true'; });
+    });
+
+    // Deselect all
+    document.getElementById('advisor-deselect-all').addEventListener('click', () => {
+      document.querySelectorAll('.advisor-cat-btn').forEach(b => { b.dataset.selected = 'false'; });
+    });
+  }
+
+  async runHtmlAdvisor() {
+    if (!this.activeTabId) {
+      this.elements.statusLeft.textContent = 'No active tab to audit';
+      return;
+    }
+
+    const tab = this.tabs.get(this.activeTabId);
+    if (!tab || !tab.webview) {
+      this.elements.statusLeft.textContent = 'Cannot audit internal pages';
+      return;
+    }
+
+    // Get selected categories
+    const selectedCategories = [];
+    document.querySelectorAll('.advisor-cat-btn[data-selected="true"]').forEach(btn => {
+      selectedCategories.push(btn.dataset.category);
+    });
+
+    if (selectedCategories.length === 0) {
+      // Show a message
+      const resultsDiv = document.getElementById('advisor-results');
+      const issuesDiv = document.getElementById('advisor-issues');
+      resultsDiv.style.display = 'block';
+      issuesDiv.innerHTML = '<div class="advisor-error">Please select at least one category to scan.</div>';
+      return;
+    }
+
+    // Show loading state
+    const loadingDiv = document.getElementById('advisor-loading');
+    const resultsDiv = document.getElementById('advisor-results');
+    resultsDiv.style.display = 'none';
+    loadingDiv.style.display = 'flex';
+
+    this.elements.statusLeft.textContent = 'Running HTML Advisor...';
+
+    try {
+      const result = await window.electronAPI.runHtmlAdvisor(this.activeTabId, selectedCategories);
+
+      if (!result) {
+        this.elements.statusLeft.textContent = 'Advisor: webview not yet ready';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'block';
+        document.getElementById('advisor-issues').innerHTML = '<div class="advisor-error">The webview is not ready yet. Please wait for the page to load and try again.</div>';
+        return;
+      }
+
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+
+      this.renderHtmlAdvisorResults(result.issues || []);
+      this.elements.statusLeft.textContent = `HTML Advisor complete: ${result.total || 0} issues found`;
+
+      // Switch to advisor panel
+      document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+      const advTab = document.querySelector('[data-panel="advisor"]');
+      if (advTab) advTab.classList.add('active');
+      document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-advisor').classList.add('active');
+
+    } catch (err) {
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+      document.getElementById('advisor-issues').innerHTML = `<div class="advisor-error">Error running advisor: ${this.escapeHtml(err.message)}</div>`;
+      this.elements.statusLeft.textContent = 'Advisor error: ' + err.message;
+    }
+  }
+
+  renderHtmlAdvisorResults(issues) {
+    const summaryDiv = document.getElementById('advisor-summary');
+    const issuesDiv = document.getElementById('advisor-issues');
+
+    if (!issues || issues.length === 0) {
+      summaryDiv.innerHTML = '';
+      issuesDiv.innerHTML = '<div class="advisor-no-issues">✅ No issues found. Great job!</div>';
+      return;
+    }
+
+    // Sort by severity: error first, then warning, then info
+    const severityOrder = { error: 0, warning: 1, info: 2 };
+    issues.sort((a, b) => {
+      const sevDiff = (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99);
+      if (sevDiff !== 0) return sevDiff;
+      return (a.category || '').localeCompare(b.category || '');
+    });
+
+    // Count by severity
+    const errors = issues.filter(i => i.severity === 'error').length;
+    const warnings = issues.filter(i => i.severity === 'warning').length;
+    const infos = issues.filter(i => i.severity === 'info').length;
+
+    // Calculate score
+    const deductionPerError = 10;
+    const deductionPerWarning = 4;
+    const deductionPerInfo = 1;
+    const score = Math.max(0, 100 - (errors * deductionPerError + warnings * deductionPerWarning + infos * deductionPerInfo));
+    const scoreClass = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+
+    // Summary
+    summaryDiv.innerHTML = `
+      <div class="advisor-summary-score">
+        <div class="score-circle-mini ${scoreClass}" style="background: conic-gradient(${scoreClass === 'good' ? 'var(--accent-green)' : scoreClass === 'warn' ? 'var(--accent-yellow)' : 'var(--accent-red)'} ${score}%, var(--bg-tertiary) 0%)">
+          <div class="score-circle-inner" style="width:26px;height:26px;font-size:10px">${score}</div>
+        </div>
+        <span>HTML Advisor Score</span>
+      </div>
+      <div class="advisor-summary-counts">
+        <span style="color:var(--accent-red);background:#f8514911">${errors} error${errors !== 1 ? 's' : ''}</span>
+        <span style="color:var(--accent-yellow);background:#d2992211">${warnings} warning${warnings !== 1 ? 's' : ''}</span>
+        <span style="color:var(--accent-blue);background:#58a6ff11">${infos} info</span>
+      </div>
+      <div style="margin-left:auto;font-size:10px;color:var(--text-muted)">${issues.length} total</div>
+    `;
+
+    // Group issues by severity
+    const groups = {
+      error: { label: 'Errors', issues: issues.filter(i => i.severity === 'error') },
+      warning: { label: 'Warnings', issues: issues.filter(i => i.severity === 'warning') },
+      info: { label: 'Info', issues: issues.filter(i => i.severity === 'info') }
+    };
+
+    let html = '';
+
+    ['error', 'warning', 'info'].forEach(severity => {
+      const group = groups[severity];
+      if (group.issues.length === 0) return;
+
+      html += `
+        <div class="advisor-issue-group advisor-group-${severity}s">
+          <div class="advisor-group-header">
+            <span>${severity === 'error' ? '🔴' : severity === 'warning' ? '🟡' : '🔵'} ${group.label}</span>
+            <span class="advisor-group-count">${group.issues.length}</span>
+          </div>
+      `;
+
+      group.issues.forEach(issue => {
+        const categoryBadge = issue.category ? `<span class="advisor-issue-badge">${this.escapeHtml(issue.category)}</span>` : '';
+        const typeBadge = issue.type ? `<span class="advisor-issue-badge">${this.escapeHtml(issue.type)}</span>` : '';
+
+        html += `
+          <div class="advisor-issue">
+            <div class="advisor-issue-severity severity-${issue.severity}"></div>
+            <div class="advisor-issue-content">
+              <div class="advisor-issue-header">
+                <span class="advisor-issue-type">${categoryBadge} ${typeBadge}</span>
+                ${issue.element ? `<span class="advisor-issue-badge">${this.escapeHtml(issue.element)}</span>` : ''}
+              </div>
+              <div class="advisor-issue-message">${this.escapeHtml(issue.message)}</div>
+              <div class="advisor-issue-recommendation">${this.escapeHtml(issue.recommendation || '')}</div>
+              ${issue.details && issue.details.length > 0 ? `<div class="advisor-issue-details">${issue.details.map(d => '• ' + this.escapeHtml(d)).join('<br>')}</div>` : ''}
+            </div>
+          </div>
+        `;
+      });
+
+      html += `</div>`;
+    });
+
+    issuesDiv.innerHTML = html;
+  }
+
+
+  // ==========================================
+  // Security Advisor - Comprehensive Security Audit
+  // ==========================================
+
+  setupSecurityAdvisorUI() {
+    document.querySelectorAll('#security-categories .advisor-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const isSelected = btn.dataset.selected === 'true';
+        btn.dataset.selected = isSelected ? 'false' : 'true';
+      });
+    });
+
+    document.getElementById('security-run-all').addEventListener('click', () => {
+      this.runSecurityAdvisor();
+    });
+
+    document.getElementById('security-select-all').addEventListener('click', () => {
+      document.querySelectorAll('#security-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'true'; });
+    });
+
+    document.getElementById('security-deselect-all').addEventListener('click', () => {
+      document.querySelectorAll('#security-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'false'; });
+    });
+  }
+
+  async runSecurityAdvisor() {
+    if (!this.activeTabId) {
+      this.elements.statusLeft.textContent = 'No active tab to scan';
+      return;
+    }
+
+    const tab = this.tabs.get(this.activeTabId);
+    if (!tab || !tab.webview) {
+      this.elements.statusLeft.textContent = 'Cannot scan internal pages';
+      return;
+    }
+
+    const selectedCategories = [];
+    document.querySelectorAll('#security-categories .advisor-cat-btn[data-selected="true"]').forEach(btn => {
+      selectedCategories.push(btn.dataset.category);
+    });
+
+    if (selectedCategories.length === 0) {
+      const resultsDiv = document.getElementById('security-results');
+      const issuesDiv = document.getElementById('security-issues');
+      resultsDiv.style.display = 'block';
+      issuesDiv.innerHTML = '<div class="advisor-error">Please select at least one security category to scan.</div>';
+      return;
+    }
+
+    const loadingDiv = document.getElementById('security-loading');
+    const resultsDiv = document.getElementById('security-results');
+    resultsDiv.style.display = 'none';
+    loadingDiv.style.display = 'flex';
+
+    this.elements.statusLeft.textContent = 'Running Security Advisor...';
+
+    try {
+      const result = await window.electronAPI.runSecurityAdvisor(this.activeTabId, selectedCategories);
+
+      if (!result) {
+        this.elements.statusLeft.textContent = 'Security Advisor: webview not yet ready';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'block';
+        document.getElementById('security-issues').innerHTML = '<div class="advisor-error">The webview is not ready yet. Please wait for the page to load and try again.</div>';
+        return;
+      }
+
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+
+      this.renderSecurityAdvisorResults(result.issues || []);
+      this.elements.statusLeft.textContent = 'Security Advisor complete: ' + (result.total || 0) + ' issues found';
+
+      // Switch to security panel
+      document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+      const secTab = document.querySelector('[data-panel="security"]');
+      if (secTab) secTab.classList.add('active');
+      document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-security').classList.add('active');
+
+    } catch (err) {
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+      document.getElementById('security-issues').innerHTML = '<div class="advisor-error">Error: ' + this.escapeHtml(err.message) + '</div>';
+      this.elements.statusLeft.textContent = 'Security Advisor error: ' + err.message;
+    }
+  }
+
+  renderSecurityAdvisorResults(issues) {
+    const summaryDiv = document.getElementById('security-summary');
+    const issuesDiv = document.getElementById('security-issues');
+
+    if (!issues || issues.length === 0) {
+      summaryDiv.innerHTML = '';
+      issuesDiv.innerHTML = '<div class="advisor-no-issues">🔒 No security issues found. Your page is secure!</div>';
+      return;
+    }
+
+    const severityOrder = { error: 0, warning: 1, info: 2 };
+    issues.sort((a, b) => {
+      const sevDiff = (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99);
+      if (sevDiff !== 0) return sevDiff;
+      return (a.category || '').localeCompare(b.category || '');
+    });
+
+    const errors = issues.filter(i => i.severity === 'error').length;
+    const warnings = issues.filter(i => i.severity === 'warning').length;
+    const infos = issues.filter(i => i.severity === 'info').length;
+
+    const deductionPerError = 15;
+    const deductionPerWarning = 5;
+    const deductionPerInfo = 1;
+    const score = Math.max(0, 100 - (errors * deductionPerError + warnings * deductionPerWarning + infos * deductionPerInfo));
+    const scoreClass = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+
+    summaryDiv.innerHTML =
+      '<div class="advisor-summary-score">' +
+        '<div class="score-circle-mini ' + scoreClass + '" style="background: conic-gradient(' + (scoreClass === 'good' ? 'var(--accent-green)' : scoreClass === 'warn' ? 'var(--accent-yellow)' : 'var(--accent-red)') + ' ' + score + '%, var(--bg-tertiary) 0%)">' +
+          '<div class="score-circle-inner" style="width:26px;height:26px;font-size:10px">' + score + '</div>' +
+        '</div>' +
+        '<span>Security Score</span>' +
+      '</div>' +
+      '<div class="advisor-summary-counts">' +
+        '<span style="color:var(--accent-red);background:#f8514911">' + errors + ' critical</span>' +
+        '<span style="color:var(--accent-yellow);background:#d2992211">' + warnings + ' warning' + (warnings !== 1 ? 's' : '') + '</span>' +
+        '<span style="color:var(--accent-blue);background:#58a6ff11">' + infos + ' info</span>' +
+      '</div>' +
+      '<div style="margin-left:auto;font-size:10px;color:var(--text-muted)">' + issues.length + ' total</div>';
+
+    const groups = {
+      error: { label: 'Critical', issues: issues.filter(i => i.severity === 'error') },
+      warning: { label: 'Warnings', issues: issues.filter(i => i.severity === 'warning') },
+      info: { label: 'Info', issues: issues.filter(i => i.severity === 'info') }
+    };
+
+    let html = '';
+    ['error', 'warning', 'info'].forEach(severity => {
+      const group = groups[severity];
+      if (group.issues.length === 0) return;
+
+      html +=
+        '<div class="advisor-issue-group advisor-group-' + severity + 's">' +
+          '<div class="advisor-group-header">' +
+            '<span>' + (severity === 'error' ? '🔴' : severity === 'warning' ? '🟡' : '🔵') + ' ' + group.label + '</span>' +
+            '<span class="advisor-group-count">' + group.issues.length + '</span>' +
+          '</div>';
+
+      group.issues.forEach(issue => {
+        const categoryBadge = issue.category ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.category) + '</span>' : '';
+        const typeBadge = issue.type ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.type) + '</span>' : '';
+
+        html +=
+          '<div class="advisor-issue">' +
+            '<div class="advisor-issue-severity severity-' + issue.severity + '"></div>' +
+            '<div class="advisor-issue-content">' +
+              '<div class="advisor-issue-header">' +
+                '<span class="advisor-issue-type">' + categoryBadge + ' ' + typeBadge + '</span>' +
+                (issue.element ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.element) + '</span>' : '') +
+              '</div>' +
+              '<div class="advisor-issue-message">' + this.escapeHtml(issue.message) + '</div>' +
+              '<div class="advisor-issue-recommendation">' + this.escapeHtml(issue.recommendation || '') + '</div>' +
+              (issue.details && issue.details.length > 0 ? '<div class="advisor-issue-details">' + issue.details.map(d => '• ' + this.escapeHtml(d)).join('<br>') + '</div>' : '') +
+            '</div>' +
+          '</div>';
+      });
+
+      html += '</div>';
+    });
+
+    issuesDiv.innerHTML = html;
+  }
+
+
+  // ==========================================
+  // Clinical Advisor (HIPAA) - Compliance Audit
+  // ==========================================
+
+  setupClinicalAdvisorUI() {
+    document.querySelectorAll('#clinical-categories .advisor-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const isSelected = btn.dataset.selected === 'true';
+        btn.dataset.selected = isSelected ? 'false' : 'true';
+      });
+    });
+
+    document.getElementById('clinical-run-all').addEventListener('click', () => {
+      this.runClinicalAdvisor();
+    });
+
+    document.getElementById('clinical-select-all').addEventListener('click', () => {
+      document.querySelectorAll('#clinical-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'true'; });
+    });
+
+    document.getElementById('clinical-deselect-all').addEventListener('click', () => {
+      document.querySelectorAll('#clinical-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'false'; });
+    });
+  }
+
+  async runClinicalAdvisor() {
+    if (!this.activeTabId) {
+      this.elements.statusLeft.textContent = 'No active tab to audit';
+      return;
+    }
+
+    const tab = this.tabs.get(this.activeTabId);
+    if (!tab || !tab.webview) {
+      this.elements.statusLeft.textContent = 'Cannot audit internal pages';
+      return;
+    }
+
+    const selectedCategories = [];
+    document.querySelectorAll('#clinical-categories .advisor-cat-btn[data-selected="true"]').forEach(btn => {
+      selectedCategories.push(btn.dataset.category);
+    });
+
+    if (selectedCategories.length === 0) {
+      const resultsDiv = document.getElementById('clinical-results');
+      const issuesDiv = document.getElementById('clinical-issues');
+      resultsDiv.style.display = 'block';
+      issuesDiv.innerHTML = '<div class="advisor-error">Please select at least one HIPAA category to audit.</div>';
+      return;
+    }
+
+    const loadingDiv = document.getElementById('clinical-loading');
+    const resultsDiv = document.getElementById('clinical-results');
+    resultsDiv.style.display = 'none';
+    loadingDiv.style.display = 'flex';
+
+    this.elements.statusLeft.textContent = 'Running HIPAA Compliance Audit...';
+
+    try {
+      const result = await window.electronAPI.runClinicalAdvisor(this.activeTabId, selectedCategories);
+
+      if (!result) {
+        this.elements.statusLeft.textContent = 'Clinical Advisor: webview not yet ready';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'block';
+        document.getElementById('clinical-issues').innerHTML = '<div class="advisor-error">The webview is not ready yet. Please wait for the page to load and try again.</div>';
+        return;
+      }
+
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+
+      this.renderClinicalAdvisorResults(result.issues || []);
+      this.elements.statusLeft.textContent = 'HIPAA Audit complete: ' + (result.total || 0) + ' issues found';
+
+      // Switch to clinical panel
+      document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+      const clinTab = document.querySelector('[data-panel="clinical"]');
+      if (clinTab) clinTab.classList.add('active');
+      document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-clinical').classList.add('active');
+
+    } catch (err) {
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+      document.getElementById('clinical-issues').innerHTML = '<div class="advisor-error">Error: ' + this.escapeHtml(err.message) + '</div>';
+      this.elements.statusLeft.textContent = 'Clinical Advisor error: ' + err.message;
+    }
+  }
+
+
+  // ==========================================
+  // UX Advisor - Usability Audit
+  // ==========================================
+
+  setupUxAdvisorUI() {
+    document.querySelectorAll('#ux-categories .advisor-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const isSelected = btn.dataset.selected === 'true';
+        btn.dataset.selected = isSelected ? 'false' : 'true';
+      });
+    });
+
+    document.getElementById('ux-run-all').addEventListener('click', () => {
+      this.runUxAdvisor();
+    });
+
+    document.getElementById('ux-select-all').addEventListener('click', () => {
+      document.querySelectorAll('#ux-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'true'; });
+    });
+
+    document.getElementById('ux-deselect-all').addEventListener('click', () => {
+      document.querySelectorAll('#ux-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'false'; });
+    });
+  }
+
+  async runUxAdvisor() {
+    if (!this.activeTabId) {
+      this.elements.statusLeft.textContent = 'No active tab to audit';
+      return;
+    }
+
+    const tab = this.tabs.get(this.activeTabId);
+    if (!tab || !tab.webview) {
+      this.elements.statusLeft.textContent = 'Cannot audit internal pages';
+      return;
+    }
+
+    const selectedCategories = [];
+    document.querySelectorAll('#ux-categories .advisor-cat-btn[data-selected="true"]').forEach(btn => {
+      selectedCategories.push(btn.dataset.category);
+    });
+
+    if (selectedCategories.length === 0) {
+      const resultsDiv = document.getElementById('ux-results');
+      const issuesDiv = document.getElementById('ux-issues');
+      resultsDiv.style.display = 'block';
+      issuesDiv.innerHTML = '<div class="advisor-error">Please select at least one UX category to audit.</div>';
+      return;
+    }
+
+    const loadingDiv = document.getElementById('ux-loading');
+    const resultsDiv = document.getElementById('ux-results');
+    resultsDiv.style.display = 'none';
+    loadingDiv.style.display = 'flex';
+
+    this.elements.statusLeft.textContent = 'Running UX Audit...';
+
+    try {
+      const result = await window.electronAPI.runUxAdvisor(this.activeTabId, selectedCategories);
+
+      if (!result) {
+        this.elements.statusLeft.textContent = 'UX Advisor: webview not yet ready';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'block';
+        document.getElementById('ux-issues').innerHTML = '<div class="advisor-error">The webview is not ready yet. Please wait for the page to load and try again.</div>';
+        return;
+      }
+
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+
+      this.renderUxAdvisorResults(result.issues || []);
+      this.elements.statusLeft.textContent = 'UX Audit complete: ' + (result.total || 0) + ' issues found';
+
+      document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+      const uxTab = document.querySelector('[data-panel="ux"]');
+      if (uxTab) uxTab.classList.add('active');
+      document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-ux').classList.add('active');
+
+    } catch (err) {
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+      document.getElementById('ux-issues').innerHTML = '<div class="advisor-error">Error: ' + this.escapeHtml(err.message) + '</div>';
+      this.elements.statusLeft.textContent = 'UX Advisor error: ' + err.message;
+    }
+  }
+
+  renderUxAdvisorResults(issues) {
+    const summaryDiv = document.getElementById('ux-summary');
+    const issuesDiv = document.getElementById('ux-issues');
+
+    if (!issues || issues.length === 0) {
+      summaryDiv.innerHTML = '';
+      issuesDiv.innerHTML = '<div class="advisor-no-issues">🎨 No usability issues found. Great user experience!</div>';
+      return;
+    }
+
+    const severityOrder = { error: 0, warning: 1, info: 2 };
+    issues.sort((a, b) => {
+      const sevDiff = (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99);
+      if (sevDiff !== 0) return sevDiff;
+      return (a.category || '').localeCompare(b.category || '');
+    });
+
+    const errors = issues.filter(i => i.severity === 'error').length;
+    const warnings = issues.filter(i => i.severity === 'warning').length;
+    const infos = issues.filter(i => i.severity === 'info').length;
+
+    const deductionPerError = 12;
+    const deductionPerWarning = 5;
+    const deductionPerInfo = 1;
+    const score = Math.max(0, 100 - (errors * deductionPerError + warnings * deductionPerWarning + infos * deductionPerInfo));
+    const scoreClass = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+
+    summaryDiv.innerHTML =
+      '<div class="advisor-summary-score">' +
+        '<div class="score-circle-mini ' + scoreClass + '" style="background: conic-gradient(' + (scoreClass === 'good' ? 'var(--accent-green)' : scoreClass === 'warn' ? 'var(--accent-yellow)' : 'var(--accent-red)') + ' ' + score + '%, var(--bg-tertiary) 0%)">' +
+          '<div class="score-circle-inner" style="width:26px;height:26px;font-size:10px">' + score + '</div>' +
+        '</div>' +
+        '<span>UX Score</span>' +
+      '</div>' +
+      '<div class="advisor-summary-counts">' +
+        '<span style="color:var(--accent-red);background:#f8514911">' + errors + ' critical</span>' +
+        '<span style="color:var(--accent-yellow);background:#d2992211">' + warnings + ' warning' + (warnings !== 1 ? 's' : '') + '</span>' +
+        '<span style="color:var(--accent-blue);background:#58a6ff11">' + infos + ' info</span>' +
+      '</div>' +
+      '<div style="margin-left:auto;font-size:10px;color:var(--text-muted)">' + issues.length + ' total</div>';
+
+    const groups = {
+      error: { label: 'Critical Issues', issues: issues.filter(i => i.severity === 'error') },
+      warning: { label: 'Warnings', issues: issues.filter(i => i.severity === 'warning') },
+      info: { label: 'Suggestions', issues: issues.filter(i => i.severity === 'info') }
+    };
+
+    let html = '';
+    ['error', 'warning', 'info'].forEach(severity => {
+      const group = groups[severity];
+      if (group.issues.length === 0) return;
+
+      html +=
+        '<div class="advisor-issue-group advisor-group-' + severity + 's">' +
+          '<div class="advisor-group-header">' +
+            '<span>' + (severity === 'error' ? '🔴' : severity === 'warning' ? '🟡' : '🔵') + ' ' + group.label + '</span>' +
+            '<span class="advisor-group-count">' + group.issues.length + '</span>' +
+          '</div>';
+
+      group.issues.forEach(issue => {
+        const categoryBadge = issue.category ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.category) + '</span>' : '';
+        const typeBadge = issue.type ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.type) + '</span>' : '';
+
+        html +=
+          '<div class="advisor-issue">' +
+            '<div class="advisor-issue-severity severity-' + issue.severity + '"></div>' +
+            '<div class="advisor-issue-content">' +
+              '<div class="advisor-issue-header">' +
+                '<span class="advisor-issue-type">' + categoryBadge + ' ' + typeBadge + '</span>' +
+                (issue.element ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.element) + '</span>' : '') +
+              '</div>' +
+              '<div class="advisor-issue-message">' + this.escapeHtml(issue.message) + '</div>' +
+              '<div class="advisor-issue-recommendation">' + this.escapeHtml(issue.recommendation || '') + '</div>' +
+              (issue.details && issue.details.length > 0 ? '<div class="advisor-issue-details">' + issue.details.map(d => '• ' + this.escapeHtml(d)).join('<br>') + '</div>' : '') +
+            '</div>' +
+          '</div>';
+      });
+
+      html += '</div>';
+    });
+
+    issuesDiv.innerHTML = html;
+  }
+
+  // ==========================================
+  // Performance Audit Advisor
+  // ==========================================
+
+  setupPerfAdvisorUI() {
+    document.querySelectorAll('#perf-categories .advisor-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const isSelected = btn.dataset.selected === 'true';
+        btn.dataset.selected = isSelected ? 'false' : 'true';
+      });
+    });
+
+    document.getElementById('perf-run-all').addEventListener('click', () => {
+      this.runPerfAdvisor();
+    });
+
+    document.getElementById('perf-select-all').addEventListener('click', () => {
+      document.querySelectorAll('#perf-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'true'; });
+    });
+
+    document.getElementById('perf-deselect-all').addEventListener('click', () => {
+      document.querySelectorAll('#perf-categories .advisor-cat-btn').forEach(b => { b.dataset.selected = 'false'; });
+    });
+  }
+
+  async runPerfAdvisor() {
+    if (!this.activeTabId) {
+      this.elements.statusLeft.textContent = 'No active tab to audit';
+      return;
+    }
+
+    const tab = this.tabs.get(this.activeTabId);
+    if (!tab || !tab.webview) {
+      this.elements.statusLeft.textContent = 'Cannot audit internal pages';
+      return;
+    }
+
+    const selectedCategories = [];
+    document.querySelectorAll('#perf-categories .advisor-cat-btn[data-selected="true"]').forEach(btn => {
+      selectedCategories.push(btn.dataset.category);
+    });
+
+    if (selectedCategories.length === 0) {
+      const resultsDiv = document.getElementById('perf-results');
+      const issuesDiv = document.getElementById('perf-issues');
+      resultsDiv.style.display = 'block';
+      issuesDiv.innerHTML = '<div class="advisor-error">Please select at least one performance category to audit.</div>';
+      return;
+    }
+
+    const loadingDiv = document.getElementById('perf-loading');
+    const resultsDiv = document.getElementById('perf-results');
+    resultsDiv.style.display = 'none';
+    loadingDiv.style.display = 'flex';
+
+    this.elements.statusLeft.textContent = 'Running Performance Audit...';
+
+    try {
+      const result = await window.electronAPI.runPerfAdvisor(this.activeTabId, selectedCategories);
+
+      if (!result) {
+        this.elements.statusLeft.textContent = 'Performance Advisor: webview not yet ready';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'block';
+        document.getElementById('perf-issues').innerHTML = '<div class="advisor-error">The webview is not ready yet. Please wait for the page to load and try again.</div>';
+        return;
+      }
+
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+
+      this.renderPerfAdvisorResults(result.issues || []);
+      this.elements.statusLeft.textContent = 'Performance Audit complete: ' + (result.total || 0) + ' issues found';
+
+      document.querySelectorAll('.monitor-tab').forEach(t => t.classList.remove('active'));
+      const perfTab = document.querySelector('[data-panel="perf-audit"]');
+      if (perfTab) perfTab.classList.add('active');
+      document.querySelectorAll('.monitor-panel-content').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-perf-audit').classList.add('active');
+
+    } catch (err) {
+      loadingDiv.style.display = 'none';
+      resultsDiv.style.display = 'block';
+      document.getElementById('perf-issues').innerHTML = '<div class="advisor-error">Error: ' + this.escapeHtml(err.message) + '</div>';
+      this.elements.statusLeft.textContent = 'Performance Advisor error: ' + err.message;
+    }
+  }
+
+  renderPerfAdvisorResults(issues) {
+    const summaryDiv = document.getElementById('perf-summary');
+    const issuesDiv = document.getElementById('perf-issues');
+
+    if (!issues || issues.length === 0) {
+      summaryDiv.innerHTML = '';
+      issuesDiv.innerHTML = '<div class="advisor-no-issues">🚀 No performance issues found. Page is well-optimized!</div>';
+      return;
+    }
+
+    const severityOrder = { error: 0, warning: 1, info: 2 };
+    issues.sort((a, b) => {
+      const sevDiff = (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99);
+      if (sevDiff !== 0) return sevDiff;
+      return (a.category || '').localeCompare(b.category || '');
+    });
+
+    const errors = issues.filter(i => i.severity === 'error').length;
+    const warnings = issues.filter(i => i.severity === 'warning').length;
+    const infos = issues.filter(i => i.severity === 'info').length;
+
+    const deductionPerError = 15;
+    const deductionPerWarning = 5;
+    const deductionPerInfo = 1;
+    const score = Math.max(0, 100 - (errors * deductionPerError + warnings * deductionPerWarning + infos * deductionPerInfo));
+    const scoreClass = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+
+    summaryDiv.innerHTML =
+      '<div class="advisor-summary-score">' +
+        '<div class="score-circle-mini ' + scoreClass + '" style="background: conic-gradient(' + (scoreClass === 'good' ? 'var(--accent-green)' : scoreClass === 'warn' ? 'var(--accent-yellow)' : 'var(--accent-red)') + ' ' + score + '%, var(--bg-tertiary) 0%)">' +
+          '<div class="score-circle-inner" style="width:26px;height:26px;font-size:10px">' + score + '</div>' +
+        '</div>' +
+        '<span>Performance Score</span>' +
+      '</div>' +
+      '<div class="advisor-summary-counts">' +
+        '<span style="color:var(--accent-red);background:#f8514911">' + errors + ' critical</span>' +
+        '<span style="color:var(--accent-yellow);background:#d2992211">' + warnings + ' warning' + (warnings !== 1 ? 's' : '') + '</span>' +
+        '<span style="color:var(--accent-blue);background:#58a6ff11">' + infos + ' info</span>' +
+      '</div>' +
+      '<div style="margin-left:auto;font-size:10px;color:var(--text-muted)">' + issues.length + ' total</div>';
+
+    const groups = {
+      error: { label: 'Critical Performance Issues', issues: issues.filter(i => i.severity === 'error') },
+      warning: { label: 'Optimization Opportunities', issues: issues.filter(i => i.severity === 'warning') },
+      info: { label: 'Suggestions', issues: issues.filter(i => i.severity === 'info') }
+    };
+
+    let html = '';
+    ['error', 'warning', 'info'].forEach(severity => {
+      const group = groups[severity];
+      if (group.issues.length === 0) return;
+
+      html +=
+        '<div class="advisor-issue-group advisor-group-' + severity + 's">' +
+          '<div class="advisor-group-header">' +
+            '<span>' + (severity === 'error' ? '🔴' : severity === 'warning' ? '🟡' : '🔵') + ' ' + group.label + '</span>' +
+            '<span class="advisor-group-count">' + group.issues.length + '</span>' +
+          '</div>';
+
+      group.issues.forEach(issue => {
+        const categoryBadge = issue.category ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.category) + '</span>' : '';
+        const typeBadge = issue.type ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.type) + '</span>' : '';
+        const valueBadge = issue.details && issue.details.length > 0 && issue.details[0].indexOf('ms') > -1 ? '<span class="advisor-issue-badge" style="background:var(--bg-active)">' + this.escapeHtml(issue.details[0]) + '</span>' : '';
+
+        html +=
+          '<div class="advisor-issue">' +
+            '<div class="advisor-issue-severity severity-' + issue.severity + '"></div>' +
+            '<div class="advisor-issue-content">' +
+              '<div class="advisor-issue-header">' +
+                '<span class="advisor-issue-type">' + categoryBadge + ' ' + typeBadge + '</span>' +
+                valueBadge +
+                (issue.element ? '<span class="advisor-issue-badge">' + this.escapeHtml(issue.element) + '</span>' : '') +
+              '</div>' +
+              '<div class="advisor-issue-message">' + this.escapeHtml(issue.message) + '</div>' +
+              '<div class="advisor-issue-recommendation">' + this.escapeHtml(issue.recommendation || '') + '</div>' +
+            '</div>' +
+          '</div>';
+      });
+
+      html += '</div>';
+    });
+
+    issuesDiv.innerHTML = html;
+  }
+
+
+  renderProcessHealthCard() {
+    const info = this._lastProcessMetrics;
+    if (!info) return;
+
+    const memMB = (info.memory.residentSet / (1024 * 1024)).toFixed(1);
+    const memPrivateMB = (info.memory.private / (1024 * 1024)).toFixed(1);
+    const cpuPct = info.cpu.percentCPUUsage.toFixed(1);
+    const heapUsedMB = (info.heap.usedHeapSize / (1024 * 1024)).toFixed(1);
+    const heapTotalMB = (info.heap.totalHeapSize / (1024 * 1024)).toFixed(1);
+
+    // Find or create the health card container
+    let healthCard = document.getElementById('process-health-card');
+    if (!healthCard) {
+      const perfPanel = document.getElementById('panel-performance');
+      if (!perfPanel) return;
+      healthCard = document.createElement('div');
+      healthCard.id = 'process-health-card';
+      perfPanel.insertBefore(healthCard, perfPanel.firstChild);
+    }
+
+    const cpuClass = info.cpu.percentCPUUsage < 30 ? 'good' : info.cpu.percentCPUUsage < 60 ? 'warn' : 'bad';
+
+    healthCard.innerHTML = `
+      <div class="monitor-card">
+        <div class="monitor-card-title">🖥️ Browser Process Health (live)</div>
+        <div class="monitor-metric">
+          <span class="monitor-metric-label">CPU Usage</span>
+          <span class="monitor-metric-value ${cpuClass}">${cpuPct}%</span>
+        </div>
+        <div class="monitor-metric">
+          <span class="monitor-metric-label">Memory (RSS)</span>
+          <span class="monitor-metric-value">${memMB} MB</span>
+        </div>
+        <div class="monitor-metric">
+          <span class="monitor-metric-label">Private Memory</span>
+          <span class="monitor-metric-value">${memPrivateMB} MB</span>
+        </div>
+        <div class="monitor-metric">
+          <span class="monitor-metric-label">Heap Used</span>
+          <span class="monitor-metric-value">${heapUsedMB} MB / ${heapTotalMB} MB</span>
+        </div>
+        <div class="monitor-metric">
+          <span class="monitor-metric-label">Idle Wakeups</span>
+          <span class="monitor-metric-value">${info.cpu.idleWakeupsPerSecond}/s</span>
+        </div>
+      </div>
+    `;
+  }
     // Tab updated (title, etc) - from main process monitoring
     window.electronAPI.onTabUpdated((data) => {
       // Only update if we don't have the info from webview events already
@@ -713,6 +1694,7 @@ class InspectorBrowser {
       this.storeMonitorData(data.tabId, 'performance', data.data);
       if (data.tabId === this.activeTabId) {
         this.renderPerformancePanel(data.data);
+        this.updateDiagnostics(data.tabId);
       }
     });
 
@@ -721,6 +1703,7 @@ class InspectorBrowser {
       this.addMonitorDataItem(data.tabId, 'network', data.data);
       if (data.tabId === this.activeTabId) {
         this.renderNetworkItem(data.data);
+        this.updateDiagnostics(data.tabId);
       }
     });
 
@@ -728,6 +1711,7 @@ class InspectorBrowser {
     window.electronAPI.onNetworkComplete((data) => {
       if (data.tabId === this.activeTabId) {
         this.updateNetworkItem(data.data);
+        this.updateDiagnostics(data.tabId);
       }
     });
 
@@ -736,6 +1720,7 @@ class InspectorBrowser {
       this.addMonitorDataItem(data.tabId, 'network', data.data);
       if (data.tabId === this.activeTabId) {
         this.renderNetworkItem(data.data);
+        this.updateDiagnostics(data.tabId);
       }
     });
 
@@ -744,6 +1729,7 @@ class InspectorBrowser {
       this.addMonitorDataItem(data.tabId, 'console', data.data);
       if (data.tabId === this.activeTabId) {
         this.renderConsoleItem(data.data);
+        this.updateDiagnostics(data.tabId);
       }
     });
   }
@@ -931,6 +1917,13 @@ class InspectorBrowser {
     const item = document.createElement('div');
     item.className = 'network-item';
     item.dataset.requestId = data.id || Date.now();
+
+    // Highlight slow/large resources — inspired by PerformanceBrowser's filtering approach
+    const isSlow = data.duration > 300;
+    const isLarge = data.responseSize > 100 * 1024; // > 100 KB
+    if (isSlow || isLarge) {
+      item.classList.add(isSlow && isLarge ? 'network-item-critical' : 'network-item-warn');
+    }
     item.innerHTML = `
       <span class="network-method ${method}">${method}</span>
       <span class="network-status">${status}</span>

@@ -47,8 +47,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runStyleAudit: (tabId) => ipcRenderer.invoke('monitor:styleAudit', tabId),
   runSecurityScan: (tabId) => ipcRenderer.invoke('monitor:securityScan', tabId),
 
+  // HTML Advisor - comprehensive page audit
+  runHtmlAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:htmlAdvisor', { tabId, categories }),
+  runSecurityAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:securityAdvisor', { tabId, categories }),
+  runClinicalAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:clinicalAdvisor', { tabId, categories }),
+  runUxAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:uxAdvisor', { tabId, categories }),
+  runPerfAdvisor: (tabId, categories) => ipcRenderer.invoke('monitor:perfAdvisor', { tabId, categories }),
+
   // Report export
   saveReport: (reportData) => ipcRenderer.invoke('export:saveReport', reportData),
+
+  // Process metrics (live CPU, memory, heap)
+  getProcessInfo: () => ipcRenderer.invoke('metrics:getProcessInfo'),
 
   // DevTools
   openDevTools: (tabId) => ipcRenderer.send('devtools:open', tabId),
